@@ -38,19 +38,25 @@ docker compose up -d --build
 - **ReDoc API 文件**：`http://localhost:8000/redoc`
 - **健康檢查端點**：`http://localhost:8000/health`
 
-### 3. 一行指令執行自動化測試
+### 3. 一行指令執行自動化測試與基準壓測
 
 ```bash
+# 執行全套自動化測試
 make test
 # 或
 docker compose --profile testing run --rm test
+
+# 執行 Token 即時作廢與認證相依層效能基準測試 (Q5.1)
+make benchmark-auth
+# 或
+docker compose --profile testing run --rm test python scripts/benchmark_token_revocation.py
 ```
 
 ---
 
-## 三、預設測試帳號（系統自動建立）
+## 三、預設測試帳號（系統啟動自動建立）
 
-> 註：將於認證模組（Commit 04）建立後由系統於啟動時自動寫入。
+系統於首次啟動或 Migration 完成後由種子模組自動寫入：
 
 - **Admin**：`admin@flashticket.com` / `AdminPass123!`
 - **User**：`user@flashticket.com` / `UserPass123!`
@@ -62,6 +68,7 @@ docker compose --profile testing run --rm test
 
 - **資料庫設計與 Schema 規範**：[docs/DATABASE.md](file:///Users/liao/Documents/flash-ticket/docs/DATABASE.md)（含完整 Mermaid ERD、欄位字典、防超賣部分索引與狀態機生命週期）
 - **AI 輔助開發日誌與除錯覆盤**：[AI_USAGE.md](file:///Users/liao/Documents/flash-ticket/AI_USAGE.md)（記錄真實開發中 AI 產出錯誤與修正案例）
+- **Token 即時作廢與認證相依層效能基準量測 (Q5.1)**：[docs/evidence/q5_token_benchmark.txt](file:///Users/liao/Documents/flash-ticket/docs/evidence/q5_token_benchmark.txt)（包含無狀態 JWT、Redis 快速失敗攔截、完整 `get_current_user` 與資料庫直查之延遲百分位數對比報告）
 
 ### 全鏈路分散式追蹤 (Distributed Tracing Architecture)
 系統全面支援以 `X-Request-ID` 為核心的端到端分散式鏈路追蹤：
@@ -79,6 +86,7 @@ docker compose --profile testing run --rm test
 
 - [x] 使用者註冊、登入、登出
 - [x] 登出與停用時憑證立即作廢（Token Version 機制）
+- [x] Token 失效效能量測與基準測試報告 (Commit 05 / Q5.1)
 - [x] RBAC 三角色權限控管（Admin、User、Viewer）
 - [x] 系統自動建立種子帳號（Admin / User / Viewer）
 - [ ] 授權矩陣自動化驗證測試 (Commit 06)
