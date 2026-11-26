@@ -4,8 +4,11 @@ import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from app.core.logging import setup_logging, request_id_ctx
+from app.core.redis import close_redis
+from app.auth.router import router as auth_router
 
 logger = logging.getLogger("flash_ticket.api")
+logger.setLevel(logging.INFO)
 
 
 @asynccontextmanager
@@ -15,6 +18,7 @@ async def lifespan(app: FastAPI):
     logger.info("Flash Ticket API service initializing...")
     yield
     logger.info("Flash Ticket API service shutting down...")
+    await close_redis()
 
 
 app = FastAPI(
@@ -23,6 +27,9 @@ app = FastAPI(
     version="1.0.0",
     lifespan=lifespan,
 )
+
+# 註冊 API 路由
+app.include_router(auth_router)
 
 
 @app.middleware("http")

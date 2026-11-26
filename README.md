@@ -77,11 +77,11 @@ docker compose --profile testing run --rm test
 
 ### 1. 使用者與權限管理
 
-- [ ] 使用者註冊、登入、登出
-- [ ] 登出與停用時憑證立即作廢（Token Version 機制）
-- [ ] RBAC 三角色權限控管（Admin、User、Viewer）
-- [ ] 系統自動建立種子帳號（Admin / User / Viewer）
-- [ ] 授權矩陣自動化驗證測試
+- [x] 使用者註冊、登入、登出
+- [x] 登出與停用時憑證立即作廢（Token Version 機制）
+- [x] RBAC 三角色權限控管（Admin、User、Viewer）
+- [x] 系統自動建立種子帳號（Admin / User / Viewer）
+- [ ] 授權矩陣自動化驗證測試 (Commit 06)
 
 ### 2. 活動與座位管理
 

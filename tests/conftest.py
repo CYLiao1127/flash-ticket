@@ -8,6 +8,7 @@ from alembic import command
 from starlette.testclient import TestClient
 
 from app.config import settings
+from app.db import get_db
 from app.main import app
 
 test_engine = create_async_engine(
@@ -23,6 +24,20 @@ TestSessionLocal = async_sessionmaker(
     autocommit=False,
     autoflush=False,
 )
+
+
+async def override_get_db():
+    async with TestSessionLocal() as session:
+        try:
+            yield session
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+app.dependency_overrides[get_db] = override_get_db
 
 
 def ensure_test_database_exists():
