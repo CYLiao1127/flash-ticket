@@ -65,3 +65,20 @@
   由 Code Review 及時指出該盲點。我們進行了兩項關鍵重構：
   1. 將測試環境改為使用 Alembic 程式化指令（`command.downgrade(cfg, 'base')` 與 `command.upgrade(cfg, 'head')`）建立實體表結構，所有資料庫測試皆在真實 migration 生成的 schema 上執行。
   2. 增加專屬自動化測試 `test_alembic_migrations_and_schema_consistency()`，透過 `alembic.autogenerate.compare_metadata` 自動比對實體資料庫與 `Base.metadata`，確保 Alembic 遷移腳本與 SQLAlchemy ORM 模型保持絕對零差異（Zero Schema Drift）。
+
+
+---
+
+### 案例 5：Alembic `fileConfig` 靜默設置 `disable_existing_loggers=True` 導致背景 Worker Logger 被停用
+- **AI 原先產出**：
+  在 `migrations/env.py` 中，AI 沿用 Alembic 範本預設的配置調用：
+  ```python
+  if config.config_file_name is not None:
+      fileConfig(config.config_file_name)
+  ```
+- **問題分析（為何有誤）**：
+  Python 標準庫 `logging.config.fileConfig` 預設帶有隱藏參數 `disable_existing_loggers=True`。當測試或服務啟動執行 Alembic 遷移腳本時，所有在此之前已經被 Python runtime import 初始化的 Logger（例如 `flash_ticket.worker`）其內部的 `logger.disabled` 屬性皆被靜默設為 `True`。這導致即使 Logger 宣告了 `INFO` 等級，`logger.isEnabledFor(INFO)` 依然回傳 `False`，所有 Worker 執行與全鏈路 Relay 日誌被徹底丟棄。
+- **發現與修正方式**：
+  在執行端到端全鏈路測試 `test_full_chain_http_to_outbox_to_worker_database` 時，發現 Outbox 狀態雖切換為 published，但日誌捕捉容器長度始終為 0。透過深入檢查 Logger 實例狀態發現 `disabled=True`。修正方式為：
+  1. 在 `migrations/env.py` 明確傳入 `fileConfig(config.config_file_name, disable_existing_loggers=False)`。
+  2. 在 `setup_logging()` 中為 `flash_ticket` 根命名空間明確設定日誌等級，杜絕現有及未來 Logger 被協力模組靜默停用。

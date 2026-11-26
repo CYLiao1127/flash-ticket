@@ -63,6 +63,14 @@ docker compose --profile testing run --rm test
 - **資料庫設計與 Schema 規範**：[docs/DATABASE.md](file:///Users/liao/Documents/flash-ticket/docs/DATABASE.md)（含完整 Mermaid ERD、欄位字典、防超賣部分索引與狀態機生命週期）
 - **AI 輔助開發日誌與除錯覆盤**：[AI_USAGE.md](file:///Users/liao/Documents/flash-ticket/AI_USAGE.md)（記錄真實開發中 AI 產出錯誤與修正案例）
 
+### 全鏈路分散式追蹤 (Distributed Tracing Architecture)
+系統全面支援以 `X-Request-ID` 為核心的端到端分散式鏈路追蹤：
+1. **HTTP 閘道層**：`request_tracing_middleware` 接收或生成 32 碼 UUID Trace ID，注入非同步安全之 `contextvars`，於回應標頭 `X-Request-ID` 返回客戶端。
+2. **結構化日誌**：`TracingFilter` 自動為每一筆 LogRecord 注入 `[instance_id]` 與 `[request_id]`，輸出標準格式：
+   `[timestamp] [level] [instance_id] [request_id] [logger:line] message`
+3. **Transactional Outbox 領域事件**：`create_outbox_event` 將當前請求的 `request_id` 自動持久化至資料庫 `event_outbox.payload`。
+4. **非同步背景 Worker**：Worker 輪詢取出事件時，自動自 payload 萃取 `request_id` 並綁定至協程 ContextVar，使非同步推播、重試與日誌無縫承接同一個 Trace ID，實現「Client $\rightarrow$ API 副本 $\rightarrow$ DB Outbox $\rightarrow$ Worker」的完全閉環。
+
 ---
 
 ## 五、功能實作進度與未完成項目 (Feature Checklist)
