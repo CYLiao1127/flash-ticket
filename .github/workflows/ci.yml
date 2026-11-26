@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  test:
+    name: Containerized Pytest Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run full containerized test suite
+        run: docker compose --profile testing run --rm --build test
+
+      - name: Clean up containers and volumes
+        if: always()
+        run: docker compose --profile testing down -v

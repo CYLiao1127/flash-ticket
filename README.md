@@ -78,6 +78,12 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 3. **Transactional Outbox 領域事件**：`create_outbox_event` 將當前請求的 `request_id` 自動持久化至資料庫 `event_outbox.payload`。
 4. **非同步背景 Worker**：Worker 輪詢取出事件時，自動自 payload 萃取 `request_id` 並綁定至協程 ContextVar，使非同步推播、重試與日誌無縫承接同一個 Trace ID，實現「Client $\rightarrow$ API 副本 $\rightarrow$ DB Outbox $\rightarrow$ Worker」的完全閉環。
 
+### 宣告式授權與動態路由覆蓋防護 (Declarative RBAC & CI Guard)
+為防止新增 API 端點時遺漏權限檢查（Q5.3）：
+1. **強制授權宣告**：所有業務端點必須掛載 `get_current_user` / `require_roles(...)` 依賴，或顯式標註 `@public_endpoint(reason=...)` 並登錄於公開白名單。
+2. **動態矩陣自動化驗證**：[tests/test_authorization.py](file:///Users/liao/Documents/flash-ticket/tests/test_authorization.py) 於 CI 階段自動遍歷 `app.routes` 解析依賴樹，針對每條受保護路由驗證匿名（401）、越權（403）與授權放行行為（角色矩陣驗證權限守門，業務邏輯則由各模組功能測試獨立覆蓋）。
+3. **GitHub Actions CI 自動執行**：[.github/workflows/ci.yml](file:///Users/liao/Documents/flash-ticket/.github/workflows/ci.yml) 於每次 `push` / `pull_request` 至 `main` 分支時自動啟動容器化測試套件，確保上述授權矩陣與 Alembic 驗證不會被略過。
+
 ---
 
 ## 五、功能實作進度與未完成項目 (Feature Checklist)
@@ -85,11 +91,12 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 ### 1. 使用者與權限管理
 
 - [x] 使用者註冊、登入、登出
-- [x] 登出與停用時憑證立即作廢（Token Version 機制）
+- [x] 登出、停用與角色變更時憑證立即作廢（Token Version 機制）
+- [x] 管理員使用者管理 API（停用／啟用帳號與修改角色即時作廢憑證）
 - [x] Token 失效效能量測與基準測試報告 (Commit 05 / Q5.1)
 - [x] RBAC 三角色權限控管（Admin、User、Viewer）
 - [x] 系統自動建立種子帳號（Admin / User / Viewer）
-- [ ] 授權矩陣自動化驗證測試 (Commit 06)
+- [x] 授權矩陣自動化驗證測試 (Commit 06 / Q5.3)
 
 ### 2. 活動與座位管理
 

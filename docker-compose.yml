@@ -138,6 +138,7 @@ services:
       - .:/workspace
     environment:
       <<: *app-env
+      INSTANCE_ID: worker-1
     depends_on:
       postgres:
         condition: service_healthy

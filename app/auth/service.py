@@ -32,6 +32,22 @@ async def set_cached_token_version(
     await redis.set(get_token_version_key(user_id), str(version), ex=REDIS_TOKEN_VERSION_TTL)
 
 
+async def _sync_or_invalidate_token_version(
+    redis: aioredis.Redis,
+    user_id: int,
+    token_version: int,
+) -> None:
+    """更新 Redis 中的最新 token_version；若失敗則刪除快取以強制回源查庫"""
+    try:
+        await set_cached_token_version(redis, user_id, token_version)
+    except Exception as e:
+        logger.warning(f"Failed to update token_version in Redis for user {user_id}: {e}")
+        try:
+            await redis.delete(get_token_version_key(user_id))
+        except Exception:
+            pass
+
+
 async def register_user(
     db: AsyncSession,
     email: str,
@@ -41,10 +57,11 @@ async def register_user(
     """註冊新使用者"""
     normalized_email = email.lower().strip()
     hashed = hash_password(password)
+    role_value = role.value if isinstance(role, UserRole) else str(role)
     user = User(
         email=normalized_email,
         hashed_password=hashed,
-        role=role,
+        role=role_value,
         is_active=True,
         token_version=1,
     )
@@ -111,17 +128,57 @@ async def revoke_user_tokens(
     await db.commit()
     await db.refresh(user)
 
-    try:
-        await set_cached_token_version(redis, user.id, user.token_version)
-    except Exception as e:
-        logger.warning(f"Failed to update token_version in Redis for user {user.id}: {e}")
-        try:
-            await redis.delete(get_token_version_key(user.id))
-        except Exception:
-            pass
+    await _sync_or_invalidate_token_version(redis, user.id, user.token_version)
 
     logger.info(f"User id={user.id} tokens revoked. New token_version={user.token_version}")
     return user.token_version
+
+
+async def update_user_role(
+    db: AsyncSession,
+    redis: aioredis.Redis,
+    user: User,
+    new_role: UserRole,
+) -> User:
+    """
+    變更使用者角色並遞增 token_version 使既有憑證立即失效 (Q5.1)
+    """
+    role_value = new_role.value if isinstance(new_role, UserRole) else str(new_role)
+    user.role = role_value
+    user.token_version += 1
+    await db.commit()
+    await db.refresh(user)
+
+    await _sync_or_invalidate_token_version(redis, user.id, user.token_version)
+
+    logger.info(
+        f"User id={user.id} role updated to {role_value}. New token_version={user.token_version}"
+    )
+    return user
+
+
+async def update_user_status(
+    db: AsyncSession,
+    redis: aioredis.Redis,
+    user: User,
+    is_active: bool,
+) -> User:
+    """
+    更新使用者啟用狀態；停用時遞增 token_version 並同步撤銷既有憑證 (Q5.1 / Q5.2)
+    """
+    user.is_active = is_active
+    if not is_active:
+        user.token_version += 1
+    await db.commit()
+    await db.refresh(user)
+
+    if not is_active:
+        await _sync_or_invalidate_token_version(redis, user.id, user.token_version)
+
+    logger.info(
+        f"User id={user.id} status updated to is_active={is_active}. token_version={user.token_version}"
+    )
+    return user
 
 
 async def deactivate_user(
@@ -132,18 +189,4 @@ async def deactivate_user(
     """
     停用使用者帳號並作廢憑證 (Q5.2 機制)
     """
-    user.is_active = False
-    user.token_version += 1
-    await db.commit()
-    await db.refresh(user)
-
-    try:
-        await set_cached_token_version(redis, user.id, user.token_version)
-    except Exception as e:
-        logger.warning(f"Failed to update token_version in Redis for user {user.id}: {e}")
-        try:
-            await redis.delete(get_token_version_key(user.id))
-        except Exception:
-            pass
-
-    logger.info(f"User id={user.id} deactivated. All tokens revoked.")
+    await update_user_status(db, redis, user, is_active=False)

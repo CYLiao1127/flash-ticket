@@ -5,7 +5,8 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI, Request
 from app.core.logging import setup_logging, request_id_ctx
 from app.core.redis import close_redis
-from app.auth.router import router as auth_router
+from app.auth.router import router as auth_router, admin_users_router
+from app.auth.dependencies import public_endpoint
 
 logger = logging.getLogger("flash_ticket.api")
 logger.setLevel(logging.INFO)
@@ -30,6 +31,7 @@ app = FastAPI(
 
 # 註冊 API 路由
 app.include_router(auth_router)
+app.include_router(admin_users_router)
 
 
 @app.middleware("http")
@@ -65,6 +67,7 @@ async def request_tracing_middleware(request: Request, call_next):
 
 
 @app.get("/health", tags=["Health"])
+@public_endpoint("Container health check probe")
 async def health_check():
     """服務健康檢查探針"""
     return {"status": "ok"}

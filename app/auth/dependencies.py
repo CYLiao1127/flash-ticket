@@ -1,5 +1,7 @@
-from typing import Callable, List, Optional
+from dataclasses import dataclass
+from typing import Callable, FrozenSet, List, Optional
 from fastapi import Depends, HTTPException, status
+from fastapi.routing import APIRoute
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -149,6 +151,23 @@ async def get_current_user(
     return user
 
 
+get_current_user.__requires_auth__ = True
+get_current_user.__allowed_roles__ = frozenset(r.value for r in UserRole)
+
+
+def public_endpoint(reason: str) -> Callable:
+    """聲明公開端點（免認證），須附帶明確原因供授權稽核驗證 (Q5.3)"""
+    if not reason or not reason.strip():
+        raise ValueError("@public_endpoint requires a non-empty reason")
+
+    def decorator(func: Callable) -> Callable:
+        func.__is_public__ = True
+        func.__public_reason__ = reason.strip()
+        return func
+
+    return decorator
+
+
 def require_roles(*allowed_roles: UserRole) -> Callable:
     """
     角色權限守門員依賴項目 (Role-Based Access Control)
@@ -163,4 +182,64 @@ def require_roles(*allowed_roles: UserRole) -> Callable:
             )
         return current_user
 
+    role_checker.__requires_auth__ = True
+    role_checker.__allowed_roles__ = frozenset(role_values)
     return role_checker
+
+
+@dataclass(frozen=True)
+class RouteAuthPolicy:
+    """路由授權政策宣告結構"""
+
+    path: str
+    methods: FrozenSet[str]
+    is_public: bool
+    public_reason: Optional[str]
+    requires_auth: bool
+    allowed_roles: FrozenSet[str]
+
+
+def inspect_route_auth_policy(route: APIRoute) -> RouteAuthPolicy:
+    """遍歷 APIRoute 依賴樹，檢查並解析宣告的授權政策 (Q5.3)"""
+    is_public = bool(getattr(route.endpoint, "__is_public__", False))
+    public_reason = getattr(route.endpoint, "__public_reason__", None)
+
+    requires_auth = False
+    role_sets: List[FrozenSet[str]] = []
+
+    stack = list(route.dependant.dependencies)
+    visited = set()
+    while stack:
+        dep = stack.pop()
+        dep_id = id(dep)
+        if dep_id in visited:
+            continue
+        visited.add(dep_id)
+
+        call = getattr(dep, "call", None)
+        if call is not None and getattr(call, "__requires_auth__", False):
+            requires_auth = True
+            allowed = getattr(call, "__allowed_roles__", frozenset())
+            role_sets.append(frozenset(allowed))
+
+        sub_deps = getattr(dep, "dependencies", None) or []
+        stack.extend(sub_deps)
+
+    effective_roles = frozenset.intersection(*role_sets) if role_sets else frozenset()
+
+    if is_public and requires_auth:
+        raise ValueError(
+            f"Contradictory auth policy on {route.path}: marked @public_endpoint but also has auth dependencies"
+        )
+
+    methods = frozenset(
+        m for m in (route.methods or set()) if m not in {"HEAD", "OPTIONS"}
+    )
+    return RouteAuthPolicy(
+        path=route.path,
+        methods=methods,
+        is_public=is_public,
+        public_reason=public_reason,
+        requires_auth=requires_auth,
+        allowed_roles=effective_roles,
+    )

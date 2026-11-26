@@ -1,5 +1,5 @@
 from datetime import datetime
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from app.models import UserRole
 
 
@@ -36,8 +36,7 @@ class UserResponse(BaseModel):
     is_active: bool
     created_at: datetime
 
-    class Config:
-        from_attributes = True
+    model_config = ConfigDict(from_attributes=True)
 
 
 class TokenResponse(BaseModel):
@@ -45,3 +44,11 @@ class TokenResponse(BaseModel):
     token_type: str = "bearer"
     expires_in: int
     user: UserResponse
+
+
+class UserRoleUpdateRequest(BaseModel):
+    role: UserRole = Field(..., description="新的使用者角色 (admin/user/viewer)")
+
+
+class UserStatusUpdateRequest(BaseModel):
+    is_active: bool = Field(..., description="帳號啟用狀態")
