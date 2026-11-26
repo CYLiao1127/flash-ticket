@@ -52,3 +52,16 @@
   1. 抽出獨立的單次執行容器 `migrate`（`restart: "no"`），負責執行 `alembic upgrade head && python -m app.auth.seed`。
   2. `api-1` 與 `api-2` 明確宣告 `depends_on: migrate: condition: service_completed_successfully`。
   3. 為 API 實例加上 `/health` 探針檢查，Nginx 必須等待 API `condition: service_healthy` 才開始轉發流量。
+
+
+---
+
+### 案例 4：測試資料庫使用 `Base.metadata.create_all()` 繞過 Migration，無法驗證實際 Schema 一致性
+- **AI 原先產出**：
+  在編寫 `tests/test_db_schema.py` 時，AI 在 pytest fixture 中直接調用 `Base.metadata.drop_all()` 與 `Base.metadata.create_all()` 來建立測試環境。
+- **問題分析（為何有誤）**：
+  使用 `Base.metadata.create_all()` 僅是將 Python ORM 定義轉成 DDL，完全沒有執行 Alembic 遷移腳本（`alembic upgrade head`）。這會導致「Alembic migration 即使遺漏欄位、索引缺失或約束名稱打錯，pytest 測試依然能全數通過」的假性安全感，失去 CI/CD 自動化驗證資料庫遷移的防禦價值。
+- **發現與修正方式**：
+  由 Code Review 及時指出該盲點。我們進行了兩項關鍵重構：
+  1. 將測試環境改為使用 Alembic 程式化指令（`command.downgrade(cfg, 'base')` 與 `command.upgrade(cfg, 'head')`）建立實體表結構，所有資料庫測試皆在真實 migration 生成的 schema 上執行。
+  2. 增加專屬自動化測試 `test_alembic_migrations_and_schema_consistency()`，透過 `alembic.autogenerate.compare_metadata` 自動比對實體資料庫與 `Base.metadata`，確保 Alembic 遷移腳本與 SQLAlchemy ORM 模型保持絕對零差異（Zero Schema Drift）。

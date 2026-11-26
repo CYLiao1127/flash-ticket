@@ -1,4 +1,4 @@
-# 高併發活動搶票與即時監控平台 (Flash Ticket)
+# Flash Ticket: 高併發活動搶票與即時監控平台
 
 本專案為一套專為高併發搶購情境設計的「活動搶票平台」，並附帶供營運與管理人員使用的「即時流量監控與分析後台」。
 
@@ -18,22 +18,28 @@
 ## 二、快速啟動與部署
 
 ### 1. 環境變數設定
+
 本專案已提供完整的環境變數範本：
+
 ```bash
 cp .env.example .env
 ```
 
 ### 2. 一鍵啟動全部服務（Docker Compose）
+
 ```bash
 docker compose up -d --build
 ```
+
 服務啟動後各入口如下：
+
 - **Web 服務與 API 閘道**：`http://localhost:8000`
 - **Swagger API 互動文件**：`http://localhost:8000/docs`
 - **ReDoc API 文件**：`http://localhost:8000/redoc`
 - **健康檢查端點**：`http://localhost:8000/health`
 
 ### 3. 一行指令執行自動化測試
+
 ```bash
 make test
 # 或
@@ -52,9 +58,17 @@ docker compose --profile testing run --rm test
 
 ---
 
-## 四、功能實作進度與未完成項目 (Feature Checklist)
+## 四、核心架構與設計文件
+
+- **資料庫設計與 Schema 規範**：[docs/DATABASE.md](file:///Users/liao/Documents/flash-ticket/docs/DATABASE.md)（含完整 Mermaid ERD、欄位字典、防超賣部分索引與狀態機生命週期）
+- **AI 輔助開發日誌與除錯覆盤**：[AI_USAGE.md](file:///Users/liao/Documents/flash-ticket/AI_USAGE.md)（記錄真實開發中 AI 產出錯誤與修正案例）
+
+---
+
+## 五、功能實作進度與未完成項目 (Feature Checklist)
 
 ### 1. 使用者與權限管理
+
 - [ ] 使用者註冊、登入、登出
 - [ ] 登出與停用時憑證立即作廢（Token Version 機制）
 - [ ] RBAC 三角色權限控管（Admin、User、Viewer）
@@ -62,6 +76,7 @@ docker compose --profile testing run --rm test
 - [ ] 授權矩陣自動化驗證測試
 
 ### 2. 活動與座位管理
+
 - [ ] 活動 CRUD（標題、描述、分類、場地、開賣/結束時間、區域與票價）
 - [ ] Keyset 分頁（防寫入時重複或遺漏）、篩選與排序
 - [ ] 樂觀鎖防並行編輯覆蓋
@@ -74,6 +89,7 @@ docker compose --profile testing run --rm test
 - [ ] 即時座位狀態推播（WebSocket / SSE）
 
 ### 3. 高併發搶票與交易
+
 - [ ] 指定座位選位購買
 - [ ] 區域配位（`SELECT FOR UPDATE SKIP LOCKED`，1~4 張）
 - [ ] 單人每場活動限購 4 張（原子級 `pg_advisory_xact_lock`）
@@ -86,6 +102,7 @@ docker compose --profile testing run --rm test
 - [ ] 訂單查詢與使用者自主取消訂單
 
 ### 4. 即時監控與維運
+
 - [ ] 每秒系統指標收集（RPS、p50/p95/p99 延遲、錯誤率、即時連線數）
 - [ ] 指標批次寫入資料庫與多副本時鐘偏差分析
 - [ ] 存取日誌批次寫入資料庫
@@ -94,16 +111,19 @@ docker compose --profile testing run --rm test
 - [ ] Admin 使用者管理（修改角色、啟用/停用狀態）
 
 ### 5. 報表匯出
+
 - [ ] 活動銷售 Excel 報表匯出（摘要、區域彙總、訂單明細）
 - [ ] 50 萬筆訂單於 512MB 記憶體上限內串流匯出（`xlsxwriter` Constant Memory）
 - [ ] 指定時區顯示（`Asia/Taipei`）與金額數值型別
 - [ ] 匯出權限校驗（User 僅限自己活動、Viewer/Admin 可看全部）
 
 ### 6. 前台與監控介面
+
 - [ ] 使用者即時座位圖與選位/搶票介面
 - [ ] 營運與管理者即時監控儀表板
 
 ### 7. 驗證與壓力測試
+
 - [ ] 一行指令執行全部測試（單元、整合、併發）
 - [ ] 刻意破壞鎖機制的超賣復現存證（Q1 驗證）
 - [ ] 情境 A 壓測（3,000 VU / 10,000 座位持續 60 秒）
