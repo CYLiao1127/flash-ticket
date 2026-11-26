@@ -1,0 +1,159 @@
+x-app-env: &app-env
+  ENVIRONMENT: ${ENVIRONMENT:-development}
+  LOG_LEVEL: ${LOG_LEVEL:-INFO}
+  DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/${POSTGRES_DB:-flash_ticket}
+  SYNC_DATABASE_URL: postgresql://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/${POSTGRES_DB:-flash_ticket}
+  REDIS_URL: redis://redis:6379/0
+  SECRET_KEY: ${SECRET_KEY:-dev-super-secret-key-change-in-production-min-32-chars}
+  JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
+  ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
+  PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-mock-payment-signature-secret-key-32chars}
+  PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-600}
+  TIMEZONE: ${TIMEZONE:-Asia/Taipei}
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: always
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-flash_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flash_password}
+      POSTGRES_DB: ${POSTGRES_DB:-flash_ticket}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-flash_user} -d ${POSTGRES_DB:-flash_ticket}"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: always
+    ports:
+      - "${REDIS_PORT:-6379}:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: "no"
+    command: sh -c "python -m app.auth.seed"
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  api-1:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    environment:
+      <<: *app-env
+      INSTANCE_ID: api-1
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  api-2:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+    environment:
+      <<: *app-env
+      INSTANCE_ID: api-2
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 5s
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  nginx:
+    image: nginx:alpine
+    restart: always
+    ports:
+      - "${APP_PORT:-8000}:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      api-1:
+        condition: service_healthy
+      api-2:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    command: python -m app.workers.runner
+    environment:
+      <<: *app-env
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
+
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    profiles: ["testing"]
+    command: pytest -v tests/
+    environment:
+      <<: *app-env
+      POSTGRES_DB: flash_ticket_test
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/flash_ticket_test
+      SYNC_DATABASE_URL: postgresql://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/flash_ticket_test
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  redis_data:

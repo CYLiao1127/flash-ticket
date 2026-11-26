@@ -1,0 +1,31 @@
+# 筆記
+ROADMAP.md
+question.md
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Testing
+.coverage
+.pytest_cache/
+htmlcov/
+
+# Secrets
+.env
+
+# OS
+.DS_Store
+Thumbs.db
+
+# 壓測與匯出產物
+*.xlsx
+loadtest-results/
+*.k6.json
+scripts/*_100k.*
