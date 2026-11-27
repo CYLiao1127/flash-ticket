@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from datetime import timedelta
 from typing import Awaitable, Callable, Dict, List, Optional, Set, Tuple
 
+import redis.asyncio as aioredis
 from fastapi import HTTPException, UploadFile, status
 from sqlalchemy import func, select
 from sqlalchemy.exc import IntegrityError
@@ -39,6 +40,7 @@ logger = logging.getLogger("flash_ticket.import")
 MAX_IMPORT_FILE_BYTES = 20 * 1024 * 1024  # 20 MB
 MAX_IMPORT_ROWS = 100_000
 COPY_BATCH_SIZE = 10_000
+DEACTIVATION_CANCEL_REASON = "Import job cancelled because creator account was deactivated"
 
 
 @dataclass(frozen=True)
@@ -62,14 +64,71 @@ def serialize_import_progress(job: ImportJob) -> Dict[str, object]:
     }
 
 
-async def _publish_job_progress(job: ImportJob) -> None:
+async def _publish_job_progress(
+    job: ImportJob,
+    redis: Optional[aioredis.Redis] = None,
+) -> None:
     """發布匯入進度至 Redis Pub/Sub 頻道（盡力通知，不因推播異常中斷匯入流程）"""
     try:
-        redis = get_redis()
+        client = redis or get_redis()
         channel = f"import_job:{job.id}:progress"
-        await redis.publish(channel, json.dumps(serialize_import_progress(job)))
+        await client.publish(channel, json.dumps(serialize_import_progress(job)))
     except Exception as exc:
         logger.warning(f"Failed to publish progress for job_id={job.id}: {exc}")
+
+
+async def _is_creator_active(session: AsyncSession, user_id: int) -> bool:
+    """向資料庫查詢匯入任務建立者最新啟用狀態 (Q5.2)"""
+    is_active = (
+        await session.execute(
+            select(User.is_active).where(User.id == user_id)
+        )
+    ).scalar_one_or_none()
+    return bool(is_active)
+
+
+async def _cancel_job_on_deactivation(
+    progress_session: AsyncSession,
+    job: ImportJob,
+    errors: List[Dict[str, object]],
+    reason: str = DEACTIVATION_CANCEL_REASON,
+) -> None:
+    """因建立者帳號遭停用而終止匯入任務並廣播 cancelled 狀態 (Q5.2)"""
+    cancel_errors = list(errors)
+    cancel_errors.append({"row": 0, "reason": reason})
+    job.status = ImportJobStatus.CANCELLED.value
+    job.imported_rows = 0
+    job.errors = cancel_errors
+    job.error_rows = len(cancel_errors)
+    job.updated_at = func.now()
+    await progress_session.commit()
+    await progress_session.refresh(job)
+    await _publish_job_progress(job)
+
+
+async def cancel_pending_import_jobs_for_user(
+    db: AsyncSession,
+    user_id: int,
+) -> List[ImportJob]:
+    """在使用者停用時將所有尚未開始執行的 pending 匯入任務標記為 cancelled（由呼叫端一併 commit）"""
+    stmt = (
+        select(ImportJob)
+        .where(
+            ImportJob.user_id == user_id,
+            ImportJob.status == ImportJobStatus.PENDING.value,
+        )
+        .with_for_update(skip_locked=True)
+    )
+    pending_jobs = list((await db.execute(stmt)).scalars().all())
+    for job in pending_jobs:
+        existing_errors = list(job.errors or [])
+        existing_errors.append({"row": 0, "reason": DEACTIVATION_CANCEL_REASON})
+        job.status = ImportJobStatus.CANCELLED.value
+        job.imported_rows = 0
+        job.errors = existing_errors
+        job.error_rows = len(existing_errors)
+        job.updated_at = func.now()
+    return pending_jobs
 
 
 async def _mark_job_failed(
@@ -334,6 +393,7 @@ async def process_import_job(
     parsed_rows: List[ParsedSeatRow],
     session_factory: async_sessionmaker[AsyncSession],
     on_batch_progress: Optional[Callable[[int, int], Awaitable[None]]] = None,
+    on_before_commit: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> None:
     """
     背景執行整段座位驗證、PostgreSQL COPY 寫入與 Redis Pub/Sub 進度推播；
@@ -348,6 +408,11 @@ async def process_import_job(
                 )
             ).scalar_one_or_none()
             if job is None:
+                return
+            if job.status == ImportJobStatus.CANCELLED.value:
+                return
+            if not await _is_creator_active(progress_session, job.user_id):
+                await _cancel_job_on_deactivation(progress_session, job, errors)
                 return
 
             job.status = ImportJobStatus.PROCESSING.value
@@ -446,14 +511,25 @@ async def process_import_job(
                 await _publish_job_progress(job)
                 return
 
-            async with session_factory() as seat_session:
-                try:
-                    if valid_records:
-                        sa_conn = await seat_session.connection()
-                        raw_conn = await sa_conn.get_raw_connection()
-                        asyncpg_conn = raw_conn.driver_connection
+            if not await _is_creator_active(progress_session, job.user_id):
+                await _cancel_job_on_deactivation(progress_session, job, errors)
+                return
 
+            async with session_factory() as seat_session:
+                if valid_records:
+                    sa_conn = await seat_session.connection()
+                    raw_conn = await sa_conn.get_raw_connection()
+                    asyncpg_conn = raw_conn.driver_connection
+
+                    tx = asyncpg_conn.transaction()
+                    await tx.start()
+                    try:
                         for offset in range(0, len(valid_records), COPY_BATCH_SIZE):
+                            if not await _is_creator_active(progress_session, job.user_id):
+                                await tx.rollback()
+                                await _cancel_job_on_deactivation(progress_session, job, errors)
+                                return
+
                             batch = valid_records[offset : offset + COPY_BATCH_SIZE]
                             await asyncpg_conn.copy_records_to_table(
                                 "seats",
@@ -475,10 +551,42 @@ async def process_import_job(
                             if on_batch_progress is not None:
                                 await on_batch_progress(job.imported_rows, job.total_rows)
 
-                    await seat_session.commit()
-                except Exception:
-                    await seat_session.rollback()
-                    raise
+                        # 在同一個 COPY 交易內對建立者列取得 FOR SHARE 鎖並驗證啟用狀態：
+                        # - 若本交易先取得鎖，並發停用 (UPDATE users) 必被阻塞至 tx.commit() 完成後才能提交；
+                        # - 若停用交易先取得鎖，本查詢必等待其提交並讀到 is_active=False 而回滾。
+                        creator_active = await asyncpg_conn.fetchval(
+                            "SELECT is_active FROM users WHERE id = $1 FOR SHARE",
+                            job.user_id,
+                        )
+                        if not creator_active:
+                            await tx.rollback()
+                            await _cancel_job_on_deactivation(progress_session, job, errors)
+                            return
+
+                        if on_before_commit is not None:
+                            await on_before_commit()
+
+                        await tx.commit()
+                    except Exception:
+                        try:
+                            await tx.rollback()
+                        except Exception:
+                            pass
+                        raise
+                else:
+                    # 無有效列可 COPY 時（例如 skip_invalid 全為無效列），仍在提交 COMPLETED 前鎖定建立者列檢查
+                    is_active = (
+                        await progress_session.execute(
+                            select(User.is_active)
+                            .where(User.id == job.user_id)
+                            .with_for_update(read=True)
+                        )
+                    ).scalar_one_or_none()
+                    if not is_active:
+                        await _cancel_job_on_deactivation(progress_session, job, errors)
+                        return
+                    if on_before_commit is not None:
+                        await on_before_commit()
 
             job.status = ImportJobStatus.COMPLETED.value
             job.imported_rows = len(valid_records)

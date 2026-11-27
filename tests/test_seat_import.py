@@ -913,3 +913,387 @@ async def test_sse_progress_stream_unbuffered_through_nginx():
                 )
                 await clean_sess.commit()
         await main_engine.dispose()
+
+
+@pytest.mark.asyncio
+async def test_import_job_cancelled_upon_user_deactivation_between_batches(client, db_session):
+    """
+    ★ 關鍵 Q5.2 驗證：使用者帳號遭停用 (is_active=False) 時：
+    1. 進行中的匯入任務必須在下一批次開始前偵測停用並主動取消 (cancelled)、回滾未提交之 COPY 批次（不遺留半套座位），並於 SSE 推播 cancelled 後正常結束串流。
+    2. 建立者既有 JWT 必須立即失效 (401)。
+    3. 尚未開始執行的 pending 任務於停用當下立即轉為 cancelled，即使後續背景執行亦不寫入座位。
+    """
+    seed_users()
+    admin_token = _login_seed(client, "admin")
+
+    owner_email = "import_owner_q52@flashticket.com"
+    owner_password = "Password123!"
+    reg_res = client.post(
+        "/api/v1/auth/register",
+        json={"email": owner_email, "password": owner_password},
+    )
+    assert reg_res.status_code == 201, reg_res.text
+    owner_token = _login(client, owner_email, owner_password)
+    event_id = _create_draft_event(client, owner_token, title="Deactivation Cancel Event")
+
+    owner_obj = (
+        await db_session.execute(select(User).where(User.email == owner_email))
+    ).scalar_one()
+    admin_obj = (
+        await db_session.execute(
+            select(User).where(User.email == "admin@flashticket.com")
+        )
+    ).scalar_one()
+
+    def _parse_frame(chunk) -> dict:
+        text_chunk = chunk.decode("utf-8") if isinstance(chunk, bytes) else str(chunk)
+        for ln in text_chunk.splitlines():
+            if ln.startswith("data: "):
+                return json.loads(ln[len("data: ") :])
+        raise AssertionError(f"Missing SSE data line in chunk: {text_chunk!r}")
+
+    # --- A. 進行中任務於第 1 批 (10,000 列) 完成後停用建立者帳號 ---
+    job = ImportJob(
+        event_id=event_id,
+        user_id=owner_obj.id,
+        file_sha256="cancel-mid-batch-sha256",
+        filename="cancel_mid_batch.csv",
+        total_rows=25_000,
+        imported_rows=0,
+        error_rows=0,
+        mode=ImportJobMode.ALL_OR_NOTHING.value,
+        status=ImportJobStatus.PENDING.value,
+        errors=[],
+    )
+    db_session.add(job)
+    await db_session.commit()
+    job_id = job.id
+
+    sse_resp = await stream_import_job_progress_endpoint(
+        event_id=event_id,
+        job_id=job_id,
+        current_user=admin_obj,
+        db=db_session,
+    )
+    body_iter = sse_resp.body_iterator
+    f_init = _parse_frame(await body_iter.__anext__())
+    assert f_init["status"] == "pending"
+
+    rows_25k: List[ParsedSeatRow] = [
+        ParsedSeatRow(
+            row_num=i + 2,
+            zone_code="VIP",
+            row_label=f"C{i // 100}",
+            seat_number=str(i % 100),
+        )
+        for i in range(25_000)
+    ]
+
+    batches_seen: List[int] = []
+
+    async def deactivate_after_first_batch(imported: int, _total: int) -> None:
+        batches_seen.append(imported)
+        if imported == 10_000:
+            deact_res = client.patch(
+                f"/api/v1/admin/users/{owner_obj.id}/status",
+                headers={"Authorization": f"Bearer {admin_token}"},
+                json={"is_active": False},
+            )
+            assert deact_res.status_code == 200, deact_res.text
+            assert deact_res.json()["is_active"] is False
+
+            # 建立者既有 JWT 必須立即失效
+            revoked_res = client.get(
+                f"/api/v1/events/{event_id}/imports/{job_id}",
+                headers={"Authorization": f"Bearer {owner_token}"},
+            )
+            assert revoked_res.status_code == 401
+
+    await process_import_job(
+        job_id,
+        rows_25k,
+        TestSessionLocal,
+        on_batch_progress=deactivate_after_first_batch,
+    )
+
+    assert batches_seen == [10_000], f"Expected halt after first batch, got {batches_seen}"
+
+    # 驗證 SSE 依序收到 processing (10,000) 與 cancelled (0) 並正常結束串流
+    frames = []
+    async for chunk in body_iter:
+        frames.append(_parse_frame(chunk))
+    statuses = [f["status"] for f in frames]
+    assert "processing" in statuses
+    assert statuses[-1] == "cancelled"
+    assert frames[-1]["imported_rows"] == 0
+
+    # 驗證 DB 與 Admin API 查詢 Job 狀態為 cancelled，且第 1 批座位已完全回滾
+    job_res = client.get(
+        f"/api/v1/events/{event_id}/imports/{job_id}",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert job_res.status_code == 200
+    job_data = job_res.json()
+    assert job_data["status"] == "cancelled"
+    assert job_data["imported_rows"] == 0
+    assert job_data["error_rows"] == 1
+    assert "deactivated" in job_data["errors"][0]["reason"].lower()
+
+    snap_res = client.get(
+        f"/api/v1/events/{event_id}/seats",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    )
+    assert snap_res.status_code == 200
+    snap_data = snap_res.json()
+    assert snap_data["total_seats"] == 0
+    assert snap_data["seats"] == []
+
+    # --- B. 尚未開始執行的 pending 任務於使用者停用當下立即標記為 cancelled ---
+    pending_email = "pending_owner_q52@flashticket.com"
+    assert (
+        client.post(
+            "/api/v1/auth/register",
+            json={"email": pending_email, "password": owner_password},
+        ).status_code
+        == 201
+    )
+    pending_token = _login(client, pending_email, owner_password)
+    pending_event_id = _create_draft_event(
+        client, pending_token, title="Pending Cancel Event"
+    )
+    pending_owner = (
+        await db_session.execute(select(User).where(User.email == pending_email))
+    ).scalar_one()
+
+    pending_job = ImportJob(
+        event_id=pending_event_id,
+        user_id=pending_owner.id,
+        file_sha256="cancel-pending-sha256",
+        filename="cancel_pending.csv",
+        total_rows=2,
+        imported_rows=0,
+        error_rows=0,
+        mode=ImportJobMode.ALL_OR_NOTHING.value,
+        status=ImportJobStatus.PENDING.value,
+        errors=[],
+    )
+    db_session.add(pending_job)
+    await db_session.commit()
+    pending_job_id = pending_job.id
+
+    pending_sse = await stream_import_job_progress_endpoint(
+        event_id=pending_event_id,
+        job_id=pending_job_id,
+        current_user=admin_obj,
+        db=db_session,
+    )
+    pending_iter = pending_sse.body_iterator
+    assert _parse_frame(await pending_iter.__anext__())["status"] == "pending"
+
+    deact_pending_res = client.patch(
+        f"/api/v1/admin/users/{pending_owner.id}/status",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"is_active": False},
+    )
+    assert deact_pending_res.status_code == 200
+
+    f_cancel = _parse_frame(await pending_iter.__anext__())
+    assert f_cancel["status"] == "cancelled"
+    assert f_cancel["imported_rows"] == 0
+    with pytest.raises(StopAsyncIteration):
+        await pending_iter.__anext__()
+
+    # 即使背景排程隨後觸發 process_import_job，也不得執行匯入
+    await process_import_job(
+        pending_job_id,
+        [ParsedSeatRow(2, "VIP", "1", "1"), ParsedSeatRow(3, "VIP", "1", "2")],
+        TestSessionLocal,
+    )
+    await db_session.refresh(pending_job)
+    assert pending_job.status == "cancelled"
+    assert pending_job.imported_rows == 0
+
+    pending_snap = client.get(
+        f"/api/v1/events/{pending_event_id}/seats",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    ).json()
+    assert pending_snap["total_seats"] == 0
+
+
+@pytest.mark.asyncio
+async def test_import_commit_and_user_deactivation_serialized_by_row_lock(client, db_session):
+    """
+    ★ 關鍵 Q5.2 邊界競態驗證：最後一次檢查建立者啟用狀態與 COPY 交易提交必須以 PostgreSQL FOR SHARE 列鎖原子協調：
+    - 情境 A（匯入交易先取得 FOR SHARE）：在 on_before_commit 期間發起停用交易，停用交易必須阻塞直到 tx.commit() 完成後才能提交，絕不出現「停用已成功回傳後，座位仍延遲提交」。
+    - 情境 B（停用交易先鎖定 users 列但尚未提交）：匯入交易執行 SELECT ... FOR SHARE 時必須等待停用提交，讀到 is_active=False 後完整回滾 COPY 交易，寫入 0 筆座位並標記為 cancelled。
+    """
+    from app.auth.service import update_user_status
+
+    seed_users()
+    admin_token = _login_seed(client, "admin")
+    password = "Password123!"
+
+    # --- 情境 A：匯入交易先取得 FOR SHARE 鎖，停用必須等 tx.commit() 完成後才提交 ---
+    email_a = "race_commit_first@flashticket.com"
+    assert (
+        client.post(
+            "/api/v1/auth/register",
+            json={"email": email_a, "password": password},
+        ).status_code
+        == 201
+    )
+    token_a = _login(client, email_a, password)
+    event_a_id = _create_draft_event(client, token_a, title="Race Commit First Event")
+    user_a = (
+        await db_session.execute(select(User).where(User.email == email_a))
+    ).scalar_one()
+
+    job_a = ImportJob(
+        event_id=event_a_id,
+        user_id=user_a.id,
+        file_sha256="race-commit-first-sha256",
+        filename="race_a.csv",
+        total_rows=5,
+        imported_rows=0,
+        error_rows=0,
+        mode=ImportJobMode.ALL_OR_NOTHING.value,
+        status=ImportJobStatus.PENDING.value,
+        errors=[],
+    )
+    db_session.add(job_a)
+    await db_session.commit()
+    job_a_id = job_a.id
+
+    rows_a = [
+        ParsedSeatRow(row_num=i + 2, zone_code="VIP", row_label="A", seat_number=str(i + 1))
+        for i in range(5)
+    ]
+
+    deactivate_task_a: asyncio.Task | None = None
+    blocked_while_holding_lock = False
+
+    async def deactivate_user_a_concurrently() -> None:
+        async with TestSessionLocal() as deact_sess:
+            target = (
+                await deact_sess.execute(select(User).where(User.id == user_a.id))
+            ).scalar_one()
+            await update_user_status(deact_sess, get_redis(), target, is_active=False)
+
+    async def hold_before_commit_a() -> None:
+        nonlocal deactivate_task_a, blocked_while_holding_lock
+        deactivate_task_a = asyncio.create_task(deactivate_user_a_concurrently())
+        # 停用交易嘗試 UPDATE users 會撞上 tx 持有的 FOR SHARE 鎖，150ms 內絕不可提前完成
+        await asyncio.sleep(0.15)
+        blocked_while_holding_lock = not deactivate_task_a.done()
+
+    await process_import_job(
+        job_a_id,
+        rows_a,
+        TestSessionLocal,
+        on_before_commit=hold_before_commit_a,
+    )
+    assert deactivate_task_a is not None
+    assert blocked_while_holding_lock is True, (
+        "Deactivation committed while import transaction still held FOR SHARE before tx.commit()"
+    )
+    await asyncio.wait_for(deactivate_task_a, timeout=5.0)
+
+    await db_session.refresh(job_a)
+    await db_session.refresh(user_a)
+    assert job_a.status == "completed"
+    assert job_a.imported_rows == 5
+    assert user_a.is_active is False
+
+    snap_a = client.get(
+        f"/api/v1/events/{event_a_id}/seats",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    ).json()
+    assert snap_a["total_seats"] == 5
+
+    # --- 情境 B：停用交易先鎖定 users 列並於 150ms 後提交，匯入交易等待後必讀到 False 並回滾 ---
+    email_b = "race_deactivate_first@flashticket.com"
+    assert (
+        client.post(
+            "/api/v1/auth/register",
+            json={"email": email_b, "password": password},
+        ).status_code
+        == 201
+    )
+    token_b = _login(client, email_b, password)
+    event_b_id = _create_draft_event(client, token_b, title="Race Deactivate First Event")
+    user_b = (
+        await db_session.execute(select(User).where(User.email == email_b))
+    ).scalar_one()
+
+    job_b = ImportJob(
+        event_id=event_b_id,
+        user_id=user_b.id,
+        file_sha256="race-deactivate-first-sha256",
+        filename="race_b.csv",
+        total_rows=5,
+        imported_rows=0,
+        error_rows=0,
+        mode=ImportJobMode.ALL_OR_NOTHING.value,
+        status=ImportJobStatus.PENDING.value,
+        errors=[],
+    )
+    db_session.add(job_b)
+    await db_session.commit()
+    job_b_id = job_b.id
+
+    rows_b = [
+        ParsedSeatRow(row_num=i + 2, zone_code="VIP", row_label="B", seat_number=str(i + 1))
+        for i in range(5)
+    ]
+
+    delayed_commit_task: asyncio.Task | None = None
+    on_before_commit_called = False
+
+    async def start_deactivation_before_final_lock(_imported: int, _total: int) -> None:
+        nonlocal delayed_commit_task
+        lock_acquired = asyncio.Event()
+
+        async def lock_then_commit_deactivation() -> None:
+            async with TestSessionLocal() as deact_sess:
+                # 先取得 users 列寫鎖（未提交），讓匯入交易的 FOR SHARE 必須等待本停用交易結果
+                await deact_sess.execute(
+                    text(
+                        "UPDATE users SET is_active = FALSE, token_version = token_version + 1 "
+                        "WHERE id = :uid"
+                    ),
+                    {"uid": user_b.id},
+                )
+                lock_acquired.set()
+                await asyncio.sleep(0.15)
+                await deact_sess.commit()
+
+        delayed_commit_task = asyncio.create_task(lock_then_commit_deactivation())
+        await lock_acquired.wait()
+
+    async def should_never_reach_commit() -> None:
+        nonlocal on_before_commit_called
+        on_before_commit_called = True
+
+    await process_import_job(
+        job_b_id,
+        rows_b,
+        TestSessionLocal,
+        on_batch_progress=start_deactivation_before_final_lock,
+        on_before_commit=should_never_reach_commit,
+    )
+    assert delayed_commit_task is not None
+    await asyncio.wait_for(delayed_commit_task, timeout=5.0)
+
+    assert on_before_commit_called is False
+    await db_session.refresh(job_b)
+    assert job_b.status == "cancelled"
+    assert job_b.imported_rows == 0
+    assert job_b.error_rows == 1
+    assert "deactivated" in job_b.errors[0]["reason"].lower()
+
+    snap_b = client.get(
+        f"/api/v1/events/{event_b_id}/seats",
+        headers={"Authorization": f"Bearer {admin_token}"},
+    ).json()
+    assert snap_b["total_seats"] == 0
+    assert snap_b["seats"] == []

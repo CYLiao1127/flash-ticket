@@ -111,6 +111,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - [x] 匯入模式支援（`all_or_nothing` 與 `skip_invalid`）
 - [x] 重複檔案 SHA-256 去重（回傳既有 Job）
 - [x] 匯入進度即時查詢與 SSE 進度推播、遺留任務恢復及錯誤列報告（`/imports/{job_id}`、`/stream`，含原列號與錯誤原因）
+- [x] 建立者帳號停用時自動取消待執行與進行中之匯入任務並回滾未提交批次（Commit 09 / Q5.2）
 - [ ] 即時座位狀態推播（WebSocket / SSE）
 
 ### 3. 高併發搶票與交易

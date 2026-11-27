@@ -1,3 +1,4 @@
+import asyncio
 import json
 from typing import List, Literal, Optional
 from fastapi import (
@@ -279,6 +280,11 @@ async def stream_import_job_progress_endpoint(
 ):
     """僅限活動建立者或 Admin 訂閱，透過 Server-Sent Events 即時推送批次匯入進度"""
     initial_job = await get_import_job(db, event_id, job_id, current_user)
+    terminal_statuses = (
+        ImportJobStatus.COMPLETED.value,
+        ImportJobStatus.FAILED.value,
+        ImportJobStatus.CANCELLED.value,
+    )
     session_factory = async_sessionmaker(
         bind=db.bind,
         class_=AsyncSession,
@@ -289,10 +295,7 @@ async def stream_import_job_progress_endpoint(
 
     async def event_stream():
         initial_payload = serialize_import_progress(initial_job)
-        if initial_job.status in (
-            ImportJobStatus.COMPLETED.value,
-            ImportJobStatus.FAILED.value,
-        ):
+        if initial_job.status in terminal_statuses:
             yield f"data: {json.dumps(initial_payload)}\n\n"
             return
 
@@ -310,17 +313,25 @@ async def stream_import_job_progress_endpoint(
                 ).scalar_one_or_none()
             snap_payload = serialize_import_progress(fresh_job or initial_job)
             yield f"data: {json.dumps(snap_payload)}\n\n"
-            if snap_payload["status"] in (
-                ImportJobStatus.COMPLETED.value,
-                ImportJobStatus.FAILED.value,
-            ):
+            if snap_payload["status"] in terminal_statuses:
                 return
 
             last_sent = snap_payload
             while True:
-                msg = await pubsub.get_message(
-                    ignore_subscribe_messages=True, timeout=1.0
-                )
+                msg = None
+                deadline = asyncio.get_running_loop().time() + 1.0
+                while True:
+                    remaining = deadline - asyncio.get_running_loop().time()
+                    if remaining <= 0:
+                        break
+                    raw_msg = await pubsub.get_message(
+                        ignore_subscribe_messages=False, timeout=remaining
+                    )
+                    if raw_msg is None:
+                        break
+                    if raw_msg.get("type") == "message":
+                        msg = raw_msg
+                        break
                 if msg is not None:
                     data_str = msg["data"]
                     if isinstance(data_str, bytes):
@@ -328,10 +339,7 @@ async def stream_import_job_progress_endpoint(
                     yield f"data: {data_str}\n\n"
                     parsed = json.loads(data_str)
                     last_sent = parsed
-                    if parsed.get("status") in (
-                        ImportJobStatus.COMPLETED.value,
-                        ImportJobStatus.FAILED.value,
-                    ):
+                    if parsed.get("status") in terminal_statuses:
                         break
                 else:
                     async with session_factory() as poll_sess:
@@ -346,10 +354,7 @@ async def stream_import_job_progress_endpoint(
                         if current_payload != last_sent:
                             yield f"data: {json.dumps(current_payload)}\n\n"
                             last_sent = current_payload
-                        if latest.status in (
-                            ImportJobStatus.COMPLETED.value,
-                            ImportJobStatus.FAILED.value,
-                        ):
+                        if latest.status in terminal_statuses:
                             break
         finally:
             await pubsub.unsubscribe(channel)

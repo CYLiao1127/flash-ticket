@@ -84,6 +84,7 @@ class ImportJobStatus(str, enum.Enum):
   PROCESSING = "processing"
   COMPLETED = "completed"
   FAILED = "failed"
+  CANCELLED = "cancelled"
 
 
 # ==========================================
@@ -610,7 +611,7 @@ class ImportJob(Base):
           name="ck_import_jobs_mode",
       ),
       CheckConstraint(
-          "status IN ('pending', 'processing', 'completed', 'failed')",
+          "status IN ('pending', 'processing', 'completed', 'failed', 'cancelled')",
           name="ck_import_jobs_status",
       ),
       # 題目硬性規範：同一活動重複上傳相同檔案回傳既有 Job，不得重複匯入

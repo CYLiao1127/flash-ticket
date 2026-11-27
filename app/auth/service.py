@@ -164,16 +164,25 @@ async def update_user_status(
     is_active: bool,
 ) -> User:
     """
-    更新使用者啟用狀態；停用時遞增 token_version 並同步撤銷既有憑證 (Q5.1 / Q5.2)
+    更新使用者啟用狀態；停用時遞增 token_version 撤銷既有憑證，並將 pending 匯入任務標記為 cancelled (Q5.1 / Q5.2)
     """
+    cancelled_jobs = []
     user.is_active = is_active
     if not is_active:
         user.token_version += 1
+        from app.events.import_service import (
+            _publish_job_progress,
+            cancel_pending_import_jobs_for_user,
+        )
+
+        cancelled_jobs = await cancel_pending_import_jobs_for_user(db, user.id)
     await db.commit()
     await db.refresh(user)
 
     if not is_active:
         await _sync_or_invalidate_token_version(redis, user.id, user.token_version)
+        for job in cancelled_jobs:
+            await _publish_job_progress(job, redis=redis)
 
     logger.info(
         f"User id={user.id} status updated to is_active={is_active}. token_version={user.token_version}"

@@ -245,10 +245,12 @@ erDiagram
 
 ### 8. `import_jobs` (大數據座位背景匯入)
 - **唯一限制**：`UNIQUE(event_id, file_sha256)`
+- **任務狀態機 (`ck_import_jobs_status`)**：`pending` $\rightarrow$ `processing` $\rightarrow$ `completed` / `failed` / `cancelled`
 - **業務規則**：
   - 當同一活動重複上傳內容完全相同的檔案時，DB 唯一約束阻止重複建立，API 自動回傳既有 Job。
   - 支援 `all_or_nothing` 與 `skip_invalid` 兩種模式。
-  - `errors` (JSONB) 記錄所有異常列之原始行號與錯誤原因。
+  - `errors` (JSONB) 記錄所有異常列之原始行號與錯誤原因（含帳號停用取消原因）。
+  - **建立者停用防護 (Q5.2)**：帳號遭停用時，尚未開始執行的 `pending` 任務將立即轉為 `cancelled`；執行中的任務除於各 `COPY` 批次前檢查建立者啟用狀態外，亦在同一個 `COPY` 提交事務內對建立者 `users` 列執行 `SELECT is_active FROM users WHERE id = $1 FOR SHARE` 與停用寫鎖（`UPDATE users`）嚴格序列化，確保「停用完成後絕不再提交該使用者的匯入」，若已停用則立即回滾該次匯入事務並標記為 `cancelled`，不殘留半套座位。
 
 ### 9. `access_logs` & `metrics_per_second` (日誌與監控)
 - `access_logs`：記錄經過系統的每筆請求，包含 `request_id`、IP、路徑、狀態碼與毫秒級延遲。
