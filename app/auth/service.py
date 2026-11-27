@@ -95,7 +95,7 @@ async def login_user(
 ) -> Tuple[str, int]:
     """
     登入使用者並簽發 JWT
-    同步將最新 token_version 快取入 Redis，確保極速 O(1) 驗證
+    同步將最新 token_version 寫入 Redis 快取供 O(1) 版本比對
     回傳 (access_token, expires_in_seconds)
     """
     try:

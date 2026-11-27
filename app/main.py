@@ -6,6 +6,7 @@ from fastapi import FastAPI, Request
 from app.core.logging import setup_logging, request_id_ctx
 from app.core.redis import close_redis
 from app.auth.router import router as auth_router, admin_users_router
+from app.events.router import router as events_router
 from app.auth.dependencies import public_endpoint
 
 logger = logging.getLogger("flash_ticket.api")
@@ -32,6 +33,7 @@ app = FastAPI(
 # 註冊 API 路由
 app.include_router(auth_router)
 app.include_router(admin_users_router)
+app.include_router(events_router)
 
 
 @app.middleware("http")

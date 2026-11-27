@@ -7,7 +7,7 @@
 ## 一、技術棧說明
 
 - **後端框架**：FastAPI (Python 3.12) - 高效非同步 ASGI 框架
-- **資料庫（唯一真實來源）**：PostgreSQL 16 - 搭配行級鎖 (`FOR UPDATE SKIP LOCKED`)、條件原子更新與部分唯一索引保證零超賣
+- **資料庫（唯一真實來源）**：PostgreSQL 16 - 規劃搭配行級鎖 (`FOR UPDATE SKIP LOCKED`)、條件原子更新與部分唯一索引實作防超賣控制
 - **快取與訊息中介**：Redis 7 - Token 快取、即時指標暫存、WebSocket 跨副本廣播
 - **反向代理與負載均衡**：Nginx (Alpine) - 雙 API 副本負載均衡、WebSocket 轉發、Request ID 追蹤
 - **容器化部署**：Docker & Docker Compose - 支援多副本部署與記憶體限制 (512MB)
@@ -76,7 +76,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 2. **結構化日誌**：`TracingFilter` 自動為每一筆 LogRecord 注入 `[instance_id]` 與 `[request_id]`，輸出標準格式：
    `[timestamp] [level] [instance_id] [request_id] [logger:line] message`
 3. **Transactional Outbox 領域事件**：`create_outbox_event` 將當前請求的 `request_id` 自動持久化至資料庫 `event_outbox.payload`。
-4. **非同步背景 Worker**：Worker 輪詢取出事件時，自動自 payload 萃取 `request_id` 並綁定至協程 ContextVar，使非同步推播、重試與日誌無縫承接同一個 Trace ID，實現「Client $\rightarrow$ API 副本 $\rightarrow$ DB Outbox $\rightarrow$ Worker」的完全閉環。
+4. **非同步背景 Worker**：Worker 以 `FOR UPDATE SKIP LOCKED` 認領待處理事件，綁定 `request_id` 至協程 ContextVar，發布至 Redis Pub/Sub 頻道成功後才將狀態標記為 `published`，延續 HTTP 至 Worker 的請求追蹤鏈路。
 
 ### 宣告式授權與動態路由覆蓋防護 (Declarative RBAC & CI Guard)
 為防止新增 API 端點時遺漏權限檢查（Q5.3）：
@@ -100,11 +100,12 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 
 ### 2. 活動與座位管理
 
-- [ ] 活動 CRUD（標題、描述、分類、場地、開賣/結束時間、區域與票價）
-- [ ] Keyset 分頁（防寫入時重複或遺漏）、篩選與排序
-- [ ] 樂觀鎖防並行編輯覆蓋
-- [ ] 已有訂單之活動禁止刪除保護
-- [ ] 活動狀態機（草稿 vs. 已發布）
+- [x] 活動 CRUD（標題、描述、分類、場地、開賣/結束時間、區域與票價）
+- [x] Keyset 分頁（防寫入時重複或遺漏）、篩選與排序
+- [x] 樂觀鎖防並行編輯覆蓋
+- [x] 已有訂單之活動禁止刪除保護
+- [x] 活動狀態機（草稿 vs. 已發布）
+- [x] 座位狀態快照 API（`GET /api/v1/events/{id}/seats`，含 `last_seq` 與分區統計）
 - [ ] 批量匯入座位（CSV / JSON，20MB / 10 萬筆 < 60 秒）
 - [ ] 匯入模式支援（`all_or_nothing` 與 `skip_invalid`）
 - [ ] 重複檔案 SHA-256 去重（回傳既有 Job）

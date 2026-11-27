@@ -132,11 +132,6 @@ class User(Base):
       server_default=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
-
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
-  )
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
@@ -206,11 +201,6 @@ class Event(Base):
       server_default=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
-
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
-  )
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
@@ -256,11 +246,6 @@ class Zone(Base):
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
       nullable=False,
-  )
-
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
   )
 
   event = relationship("Event", back_populates="zones")
@@ -315,11 +300,6 @@ class Seat(Base):
       server_default=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
-
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
-  )
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
@@ -335,11 +315,11 @@ class Seat(Base):
       CheckConstraint(
           "status IN ('available', 'held', 'sold')", name="ck_seats_status"
       ),
-      # 2. 複合外鍵：保證座位的 zone_code 必須合法存在於該活動的 zones 中
+      # 2. 複合外鍵：保證座位的 zone_code 必須合法存在於該活動的 zones 中，且有座位時物理禁止刪除區域
       ForeignKeyConstraint(
           ["event_id", "zone_code"],
           ["zones.event_id", "zones.zone_code"],
-          ondelete="CASCADE",
+          ondelete="RESTRICT",
           name="fk_seats_zones_event_zone",
       ),
       # 3. 防止同場活動重複匯入相同位置
@@ -372,8 +352,8 @@ class Order(Base):
 
   - service_fee: 5% 服務費精確四捨五入 (ROUND_HALF_UP)。
   - idempotency_key: 冪等鍵，保證重試安全性。
-  - ix_orders_user_created: 使用者「我的訂單」頁面極速檢索。
-  - ix_orders_pending_expiry: ★ 關鍵部分索引，Cleanup Worker 掃描過期訂單極速化。
+  - ix_orders_user_created: 加速使用者「我的訂單」頁面排序查詢。
+  - ix_orders_pending_expiry: 部分索引，僅索引 pending 訂單以縮小逾時掃描範圍。
   """
 
   __tablename__ = "orders"
@@ -416,11 +396,6 @@ class Order(Base):
       server_default=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
-
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
-  )
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
@@ -443,7 +418,7 @@ class Order(Base):
       UniqueConstraint("idempotency_key", name="uq_orders_idempotency_key"),
       # 1. 使用者歷史訂單查詢加速 (WHERE user_id = :uid ORDER BY created_at DESC)
       Index("ix_orders_user_created", "user_id", "created_at"),
-      # 2. ★ 待付款逾時掃描部分索引 (只索引 pending 狀態，數萬歷史訂單不影響性能)
+      # 2. 待付款逾時掃描部分索引 (僅索引 pending 狀態，避免掃描歷史訂單)
       Index(
           "ix_orders_pending_expiry",
           "expires_at",
@@ -458,7 +433,7 @@ class Order(Base):
 class OrderItem(Base):
   """訂單明細項目
 
-  ★ 關鍵物理約束防線：
+  物理約束防線：
   1. uq_order_item_seat: 同一張訂單內不可重複加入同一座位。
   2. uq_active_seat_order: 針對 status IN ('held', 'paid') 建立部分唯一索引。
      即使應用程式併發控制失效，資料庫引擎在物理上亦絕對禁止同一個座位同時存在於兩個有效訂單中！
@@ -486,11 +461,6 @@ class OrderItem(Base):
       nullable=False,
   )
 
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
-  )
-
   order = relationship("Order", back_populates="items")
   seat = relationship("Seat")
 
@@ -500,7 +470,7 @@ class OrderItem(Base):
       ),
       # 1. 保證同一張訂單內不重複加入相同座位
       UniqueConstraint("order_id", "seat_id", name="uq_order_item_seat"),
-      # 2. ★ 跨訂單核心防超賣部分唯一索引 (Partial Unique Index)
+      # 2. 跨訂單防超賣部分唯一索引 (Partial Unique Index)
       Index(
           "uq_active_seat_order",
           "seat_id",
@@ -519,7 +489,7 @@ class EventOutbox(Base):
 
   - 座位變更與此表於同一個 DB 事務內提交，解決 Dual-Write 一致性中斷問題。
   - sequence_id: 單一活動專屬連續序號，由 Relay Worker 推播至 Redis Pub/Sub。
-  - ix_outbox_pending_relay: ★ 關鍵部分索引 (Partial Index)，只索引 status = 'pending'，避免百萬歷史數據撐爆索引。
+  - ix_outbox_pending_relay: 部分索引 (Partial Index)，僅索引 status = 'pending' 以維持索引精簡。
   """
 
   __tablename__ = "event_outbox"
@@ -548,11 +518,6 @@ class EventOutbox(Base):
       nullable=False,
   )
 
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
-  )
-
   event = relationship("Event", back_populates="outbox_events")
 
   __table_args__ = (
@@ -562,7 +527,7 @@ class EventOutbox(Base):
       UniqueConstraint(
           "event_id", "sequence_id", name="uq_event_outbox_sequence"
       ),
-      # ★ 核心優化：Partial Index，只對 pending 狀態建索引，維持毫秒級撈取極速
+      # Partial Index，僅針對待發布事件建立索引，縮小掃描範圍
       Index(
           "ix_outbox_pending_relay",
           "created_at",
@@ -625,11 +590,6 @@ class ImportJob(Base):
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
       nullable=False,
-  )
-
-
-  __table_args__ = (
-      UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
   )
   updated_at = Column(
       DateTime(timezone=True),

@@ -1,3 +1,4 @@
+import json
 import logging
 import pytest
 from datetime import datetime, timezone, timedelta
@@ -7,9 +8,11 @@ from starlette.testclient import TestClient
 from app.main import app
 from app.core.logging import request_id_ctx, TracingFilter, setup_logging
 from app.core.outbox import create_outbox_event
+from app.core.redis import get_redis
 from app.workers.runner import process_outbox_event, poll_and_relay_outbox
 from app.models import User, UserRole, Event, EventOutbox, OutboxStatus
 from app.config import settings
+from tests.conftest import TestSessionLocal
 
 
 def test_generated_request_id(client):
@@ -184,3 +187,91 @@ async def test_full_chain_http_to_outbox_to_worker_database(db_session):
         assert f"Relaying outbox event id={persisted_event.id}" in log_record.getMessage()
     finally:
         worker_logger.removeHandler(handler)
+
+
+@pytest.mark.asyncio
+async def test_worker_publishes_to_redis_and_retains_pending_on_publish_failure(db_session):
+    """
+    驗證 Outbox Worker 的可靠性與並發安全：
+    1. Redis publish 失敗時必須保留 PENDING 狀態（不可提前標記 PUBLISHED）
+    2. 實際透過 Redis Pub/Sub 推播給訂閱端且發送成功後，才標記 PUBLISHED
+    3. 兩個 Worker 同時執行時，FOR UPDATE SKIP LOCKED 確保不重複認領同一事件
+    """
+    now = datetime.now(timezone.utc)
+    user = User(email="relay_test@flashticket.com", hashed_password="pw", role=UserRole.ADMIN)
+    db_session.add(user)
+    await db_session.flush()
+
+    ev = Event(
+        creator_id=user.id,
+        title="Relay Event",
+        category="Music",
+        venue="Hall",
+        start_time=now + timedelta(days=1),
+        end_time=now + timedelta(days=2),
+    )
+    db_session.add(ev)
+    await db_session.flush()
+
+    outbox = EventOutbox(
+        event_id=ev.id,
+        sequence_id=10,
+        event_type="seat_held",
+        payload={"seat_id": 123, "request_id": "trace-pubsub-001"},
+        status=OutboxStatus.PENDING,
+    )
+    db_session.add(outbox)
+    await db_session.commit()
+    outbox_id = outbox.id
+    event_id = ev.id
+
+    # 1. 模擬 Redis 發布失敗 -> 回傳 False 且維持 PENDING
+    class FailingRedis:
+        async def publish(self, channel, message):
+            raise ConnectionError("Redis unavailable")
+
+    ok = await process_outbox_event(outbox, db_session, redis=FailingRedis())
+    assert ok is False
+    assert outbox.status == OutboxStatus.PENDING
+
+    # 2. 驗證 FOR UPDATE SKIP LOCKED：Session A 持鎖未提交時，Session B 跳過不重複處理
+    async with TestSessionLocal() as sess_lock:
+        locked_row = (
+            await sess_lock.execute(
+                select(EventOutbox)
+                .where(EventOutbox.id == outbox_id)
+                .with_for_update()
+            )
+        ).scalar_one()
+        assert locked_row.id == outbox_id
+
+        async with TestSessionLocal() as sess_worker2:
+            skipped_count = await poll_and_relay_outbox(sess_worker2)
+            assert skipped_count == 0
+        await sess_lock.rollback()
+
+    # 3. 訂閱實際 Redis 頻道並執行輪詢推播，驗證訂閱者收到訊息且狀態轉為 PUBLISHED
+    redis = get_redis()
+    pubsub = redis.pubsub()
+    channel = f"event:{event_id}:updates"
+    await pubsub.subscribe(channel)
+    try:
+        # 消耗 subscribe 確認訊號
+        await pubsub.get_message(ignore_subscribe_messages=False, timeout=1.0)
+
+        relayed = await poll_and_relay_outbox(db_session, redis=redis)
+        assert relayed == 1
+
+        msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=2.0)
+        assert msg is not None, "Expected Redis Pub/Sub subscriber to receive outbox message"
+        body = json.loads(msg["data"])
+        assert body["outbox_id"] == outbox_id
+        assert body["event_id"] == event_id
+        assert body["sequence_id"] == 10
+        assert body["payload"]["request_id"] == "trace-pubsub-001"
+
+        await db_session.refresh(outbox)
+        assert outbox.status == OutboxStatus.PUBLISHED
+    finally:
+        await pubsub.unsubscribe(channel)
+        await pubsub.aclose()

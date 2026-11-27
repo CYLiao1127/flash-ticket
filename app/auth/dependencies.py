@@ -85,7 +85,7 @@ async def get_current_user(
     user: Optional[User] = None
 
     if cached_version is not None:
-        # Cache Hit：第一道極速比對
+        # Cache Hit：優先比對 Redis 快取版本，不符即快速拒絕
         if cached_version != token_version:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,

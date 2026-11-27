@@ -191,9 +191,9 @@ erDiagram
   ```sql
   FOREIGN KEY (event_id, zone_code) 
   REFERENCES zones(event_id, zone_code) 
-  ON DELETE CASCADE
+  ON DELETE RESTRICT
   ```
-  **效益**：兼顧 10 萬筆匯入時直接拿 CSV 原生 `zone_code` 寫入的極致效能，同時由資料庫強制驗證「該分區代碼必須合法存在於該活動的 zones 中」。
+  **效益**：兼顧 10 萬筆匯入時直接拿 CSV 原生 `zone_code` 寫入的極致效能，同時由資料庫強制驗證「該分區代碼必須合法存在於該活動的 zones 中」；`ON DELETE RESTRICT` 則從資料庫實體層杜絕在並發增座與刪區時發生靜默級聯刪掉座位（Silent Cascade Loss）的風險。
 - **關鍵索引**：
   - `ix_seats_allocation`: `(event_id, zone_code, status, row_label, seat_number)`（配合 `FOR UPDATE SKIP LOCKED` 高速配位）
   - `ix_seats_held_expiry`: `(status, expires_at)`（背景 Cleanup Worker 撈取過期座位）
@@ -234,14 +234,14 @@ erDiagram
   - `event_type`: 事件型態（如 `seat_held`, `seat_released`, `seat_sold`）。
   - `payload`: JSONB 資料（含座位座標、新狀態、時間戳、`request_id`）。
   - `status`: `pending` $\rightarrow$ `published`。
-- **★ 核心效能優化：待發布部分索引 (Partial Index)**：
+- **待發布部分索引 (Partial Index)**：
   ```sql
   CREATE INDEX ix_outbox_pending_relay 
   ON event_outbox (created_at) 
   WHERE status = 'pending';
   ```
   **設計原理**：
-  隨售票進行，已發布歷史事件（`published`）將達數十萬筆。普通索引會導致 B-Tree 龐大膨脹；使用部分索引僅索引待發布事件（`pending`），索引體積微小，Relay Worker 的輪詢與發布能永遠保持在記憶體層級的 O(log N) 極速！
+  隨售票進行，已發布歷史事件（`published`）將持續累積。使用部分索引僅索引待發布事件（`pending`），縮小索引體積並避免掃描已發布資料。
 
 ### 8. `import_jobs` (大數據座位背景匯入)
 - **唯一限制**：`UNIQUE(event_id, file_sha256)`
@@ -306,12 +306,12 @@ erDiagram
 1. **`uq_active_seat_order` (`order_items.seat_id WHERE status IN ('held', 'paid')`)**：
    跨訂單的核心物理防線，保證同一座位絕不可能同時處於兩個有效的搶票/付款訂單中。
 2. **`ix_outbox_pending_relay` (`event_outbox.created_at WHERE status = 'pending'`)**：
-   隨搶票累積數十萬筆 `published` 歷史事件時，排除歷史資料，僅對待發布事件建索引，使 Relay Worker 輪詢速度永遠維持在微秒級。
+   排除已發布的歷史 `published` 事件，僅對待發布事件建索引以維持 Relay Worker 輪詢效率。
 3. **`ix_orders_pending_expiry` (`orders.expires_at WHERE status = 'pending'`)**：
    使過期清理 Worker 的定時掃描精確定位在過期且未付款的訂單上，避免掃描海量已完成（`paid`）或已取消（`cancelled`）的歷史訂單。
 
 ### 4. 複合外鍵與唯一性防線 (Composite Integrity)
-- **`Seat` 複合外鍵**：`(event_id, zone_code)` 直接參照 `zones (event_id, zone_code)`，使得 10,000 筆座位批次匯入時無須逐筆將分區代碼查詢轉換為 `zone_id`，兼顧極致匯入效能與關聯完整性防線。
+- **`Seat` 複合外鍵**：`(event_id, zone_code)` 直接參照 `zones (event_id, zone_code)`，使得大量座位批次匯入時無須逐筆查詢轉換為 `zone_id`，同時在資料庫層強制檢查區域合法性。
 - **`Zone` 唯一約束**：`UNIQUE(event_id, zone_code)` 防止同一活動內重複建立同名分區。
 - **`Seat` 唯一約束**：`UNIQUE(event_id, zone_code, row_label, seat_number)` 防止匯入時重複產生相同座位實體。
 - **`ImportJob` 唯一約束**：`UNIQUE(event_id, file_sha256)` 防止管理員重複上傳相同檔案觸發重複匯入。
