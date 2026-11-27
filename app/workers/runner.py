@@ -11,7 +11,7 @@ import logging
 from typing import Optional
 
 import redis.asyncio as aioredis
-from sqlalchemy import select
+from sqlalchemy import select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import request_id_ctx, setup_logging
@@ -29,6 +29,9 @@ from app.db import AsyncSessionLocal
 setup_logging()
 logger = logging.getLogger("flash_ticket.worker")
 logger.setLevel(logging.INFO)
+
+# Outbox Relay 單一 Leader 選主鎖鍵（透過 PostgreSQL 交易級諮詢鎖避免多 Worker 同時撈取導致亂序，Q4）
+OUTBOX_RELAY_LEADER_LOCK_KEY = 420001
 
 
 async def process_outbox_event(
@@ -86,14 +89,35 @@ async def poll_and_relay_outbox(
     session: AsyncSession,
     limit: int = 100,
     redis: Optional[aioredis.Redis] = None,
+    use_leader_election: bool = True,
+    on_leader_acquired=None,
 ) -> int:
     """
-    輪詢待發布事件並批次發布；使用 FOR UPDATE SKIP LOCKED 避免多 Worker 重複認領同一事件。
+    Leader-Elected Outbox Relay (Q4)：
+    1. 透過 `pg_try_advisory_xact_lock` 選出單一 Leader Worker，非 Leader 立即跳過避免多實例併發發送造成亂序。
+    2. 嚴格依 `(event_id ASC, sequence_id ASC, id ASC)` 撈取 `status = 'pending'` 事件並依序發布至 Redis Pub/Sub。
+    3. 同一 `event_id` 若前序事件發布失敗，立即停止該活動後續序號的發布，防止跳號亂序。
     """
+    if use_leader_election:
+        acquired = (
+            await session.execute(
+                text("SELECT pg_try_advisory_xact_lock(:lock_key)"),
+                {"lock_key": OUTBOX_RELAY_LEADER_LOCK_KEY},
+            )
+        ).scalar_one()
+        if not acquired:
+            return 0
+        if on_leader_acquired is not None:
+            await on_leader_acquired()
+
     stmt = (
         select(EventOutbox)
         .where(EventOutbox.status == OutboxStatus.PENDING)
-        .order_by(EventOutbox.created_at.asc(), EventOutbox.id.asc())
+        .order_by(
+            EventOutbox.event_id.asc(),
+            EventOutbox.sequence_id.asc(),
+            EventOutbox.id.asc(),
+        )
         .limit(limit)
         .with_for_update(skip_locked=True)
     )
@@ -101,12 +125,20 @@ async def poll_and_relay_outbox(
     events = res.scalars().all()
 
     if not events:
+        if use_leader_election:
+            await session.commit()
         return 0
 
     published_count = 0
+    blocked_event_ids = set()
     for event in events:
+        if event.event_id in blocked_event_ids:
+            continue
         if await process_outbox_event(event, session, redis=redis):
             published_count += 1
+        else:
+            # 嚴格保持單一活動序號順序：前序失敗時暫停同活動後續事件
+            blocked_event_ids.add(event.event_id)
 
     await session.commit()
     return published_count
