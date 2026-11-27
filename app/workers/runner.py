@@ -17,7 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import request_id_ctx, setup_logging
 from app.core.redis import close_redis, get_redis
 from app.events.import_service import recover_stale_import_jobs
-from app.payments.service import release_expired_orders
+from app.payments.service import execute_mock_refund, release_expired_orders
 from app.models import EventOutbox, OutboxStatus
 from app.db import AsyncSessionLocal
 
@@ -42,6 +42,14 @@ async def process_outbox_event(
 
     token = request_id_ctx.set(req_id)
     try:
+        if event.event_type == "order_refund_required":
+            await execute_mock_refund(
+                order_id=int(payload["order_id"]),
+                amount=str(payload.get("amount", "0.00")),
+                webhook_event_id=payload.get("webhook_event_id"),
+                redis=redis_client,
+            )
+
         channel = f"event:{event.event_id}:updates"
         message = json.dumps(
             {

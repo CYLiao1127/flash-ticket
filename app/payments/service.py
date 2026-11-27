@@ -37,6 +37,47 @@ logger = logging.getLogger("flash_ticket.payments")
 
 WEBHOOK_PROCESSING_LOCK_TTL_SECONDS = 60  # 處理中鎖短 TTL，避免程序異常中斷後長時間卡住 409
 WEBHOOK_COMPLETED_CACHE_TTL_SECONDS = 86400  # 已完成結果快取 24 小時
+MOCK_REFUND_RECEIPT_TTL_SECONDS = 86400 * 7  # 模擬退款收據保留 7 天（冪等防重複退款）
+
+
+async def execute_mock_refund(
+    order_id: int,
+    amount: str,
+    webhook_event_id: Optional[str] = None,
+    redis=None,
+) -> Dict[str, object]:
+    """
+    模擬金流自動退款閘道（依 order_id 冪等執行，防止 Outbox 至少一次投遞造成重複退款）。
+    回傳退款收據（首次執行 refunded=True, duplicate=False；重複呼叫回傳既有收據 duplicate=True）。
+    """
+    client = redis or get_redis()
+    receipt_key = f"payment:refund:order:{order_id}"
+    receipt = {
+        "refund_id": f"ref_{uuid.uuid4().hex[:16]}",
+        "order_id": order_id,
+        "amount": str(amount),
+        "webhook_event_id": webhook_event_id,
+        "status": "refunded",
+        "executed_at": int(time.time()),
+    }
+    created = bool(
+        await client.set(
+            receipt_key,
+            json.dumps(receipt),
+            nx=True,
+            ex=MOCK_REFUND_RECEIPT_TTL_SECONDS,
+        )
+    )
+    if created:
+        logger.info(
+            f"[MockGateway] Executed automatic refund refund_id={receipt['refund_id']} "
+            f"order_id={order_id} amount={amount}"
+        )
+        return {**receipt, "duplicate": False}
+
+    existing_raw = await client.get(receipt_key)
+    existing = json.loads(existing_raw) if existing_raw else receipt
+    return {**existing, "duplicate": True}
 
 _RELEASE_WEBHOOK_PROCESSING_LUA = """
 local val = redis.call('GET', KEYS[1])
@@ -346,12 +387,17 @@ async def process_payment_webhook(
 
         seq_id: Optional[int] = None
         action = "ignored"
+        refund_triggered = False
 
         if payload.payment_status == "failed":
             action = "payment_failed_recorded"
             await db.rollback()
         elif order_status_val == OrderStatus.PAID.value:
             action = "already_paid"
+            await db.rollback()
+        elif order_status_val == OrderStatus.CANCELLED_REFUND_REQUIRED.value:
+            action = "already_refund_required"
+            refund_triggered = True
             await db.rollback()
         elif order_status_val == OrderStatus.PENDING.value:
             pairs = (await _load_order_items_with_seats(db, [order_id_val])).get(
@@ -414,10 +460,117 @@ async def process_payment_webhook(
             await db.commit()
             order_status_val = OrderStatus.PAID.value
             action = "paid"
-        else:
-            # 已逾時取消或標記退款之訂單（Commit 16 將擴充完整「復活 or 退款」狀態機）
-            action = "order_already_cancelled"
-            await db.rollback()
+        elif order_status_val == OrderStatus.CANCELLED.value:
+            # ★ Q2.1 逾時取消後遲到 Webhook 的「復活 or 退款」單一交易決策：
+            # 1. 鎖定原訂單所有座位 (ORDER BY id ASC FOR UPDATE 防止死結)。
+            # 2. 若全部原座位仍為 available -> 重新佔位轉 sold、訂單復活為 paid。
+            # 3. 若任一原座位已被他人鎖定或售出 -> 整筆轉 cancelled_refund_required 觸發退款，絕不部分復活或覆寫他人座位。
+            pairs = (await _load_order_items_with_seats(db, [order_id_val])).get(
+                order_id_val, []
+            )
+            seat_ids = sorted(seat.id for _, seat in pairs)
+            seats_locked: List[Seat] = []
+            if seat_ids:
+                seats_locked = list(
+                    (
+                        await db.execute(
+                            select(Seat)
+                            .where(Seat.id.in_(seat_ids))
+                            .order_by(Seat.id.asc())
+                            .with_for_update()
+                            .execution_options(populate_existing=True)
+                        )
+                    )
+                    .scalars()
+                    .all()
+                )
+
+            all_available = (
+                len(seat_ids) > 0
+                and len(seats_locked) == len(seat_ids)
+                and all(s.status == SeatStatus.AVAILABLE.value for s in seats_locked)
+            )
+
+            if all_available:
+                sold_seats_payload = []
+                for seat in seats_locked:
+                    seat.status = SeatStatus.SOLD.value
+                    seat.held_by = order.user_id
+                    seat.expires_at = None
+                    seat.version += 1
+                    seat.updated_at = func.now()
+                    sold_seats_payload.append(
+                        {
+                            "seat_id": seat.id,
+                            "zone_code": seat.zone_code,
+                            "row_label": seat.row_label,
+                            "seat_number": seat.seat_number,
+                            "status": SeatStatus.SOLD.value,
+                        }
+                    )
+
+                for item, _ in pairs:
+                    item.status = OrderItemStatus.PAID.value
+
+                order.status = OrderStatus.PAID.value
+                order.updated_at = func.now()
+
+                seq_id = await _allocate_event_sequence(db, order.event_id)
+                db.add(
+                    create_outbox_event(
+                        event_id=order.event_id,
+                        sequence_id=seq_id,
+                        event_type="seat_sold",
+                        payload={
+                            "order_id": order_id_val,
+                            "user_id": order.user_id,
+                            "event_id": order.event_id,
+                            "webhook_event_id": payload.webhook_event_id,
+                            "revived": True,
+                            "seats": sold_seats_payload,
+                        },
+                    )
+                )
+                await db.commit()
+                order_status_val = OrderStatus.PAID.value
+                action = "revived"
+                logger.info(
+                    f"Late webhook revived cancelled order_id={order_id_val} "
+                    f"(seats={seat_ids}, sequence_id={seq_id})"
+                )
+            else:
+                conflicting_seat_ids = [
+                    s.id
+                    for s in seats_locked
+                    if s.status != SeatStatus.AVAILABLE.value
+                ]
+                order.status = OrderStatus.CANCELLED_REFUND_REQUIRED.value
+                order.updated_at = func.now()
+
+                seq_id = await _allocate_event_sequence(db, order.event_id)
+                db.add(
+                    create_outbox_event(
+                        event_id=order.event_id,
+                        sequence_id=seq_id,
+                        event_type="order_refund_required",
+                        payload={
+                            "order_id": order_id_val,
+                            "user_id": order.user_id,
+                            "event_id": order.event_id,
+                            "amount": str(order_total_val),
+                            "webhook_event_id": payload.webhook_event_id,
+                            "conflicting_seat_ids": conflicting_seat_ids,
+                        },
+                    )
+                )
+                await db.commit()
+                order_status_val = OrderStatus.CANCELLED_REFUND_REQUIRED.value
+                action = "refund_required"
+                refund_triggered = True
+                logger.warning(
+                    f"Late webhook for cancelled order_id={order_id_val} could not revive "
+                    f"(conflicting_seats={conflicting_seat_ids}); triggered refund amount={order_total_val}"
+                )
 
         result = PaymentWebhookResponse(
             webhook_event_id=payload.webhook_event_id,
@@ -425,6 +578,7 @@ async def process_payment_webhook(
             order_status=order_status_val,
             action=action,
             duplicate=False,
+            refund_triggered=refund_triggered,
             sequence_id=seq_id,
         )
         try:

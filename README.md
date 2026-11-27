@@ -125,7 +125,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - [x] 5% 服務費精確四捨五入（`Decimal` `ROUND_HALF_UP`）
 - [x] 模擬金流服務與 HMAC Webhook 簽章回呼（5 分鐘防重放 + 事件冪等）
 - [x] 逾時未付款自動釋放（DB-Clock `NOW()` 冪等釋放 Worker）
-- [ ] 逾時後 Webhook 到達的「復活 or 退款」事務處理
+- [x] 逾時後 Webhook 到達的「復活 or 退款」事務處理（Q2.1）
 - [x] 訂單查詢與使用者自主取消訂單
 
 ### 4. 即時監控與維運

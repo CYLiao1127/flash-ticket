@@ -67,6 +67,7 @@ class PaymentWebhookResponse(BaseModel):
     order_status: str
     action: str
     duplicate: bool = False
+    refund_triggered: bool = False
     sequence_id: Optional[int] = None
 
 

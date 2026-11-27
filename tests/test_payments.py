@@ -475,3 +475,258 @@ async def test_db_clock_timeout_worker_releases_expired_orders_idempotently(
         json={"seat_ids": [seats[0].id]},
     )
     assert rebook.status_code == 201, rebook.text
+
+
+@pytest.mark.asyncio
+async def test_late_webhook_revives_cancelled_order_when_all_seats_available(
+    client, db_session
+):
+    """
+    ★ 關鍵 Q2.1 測試（復活分支）：
+    訂單逾時釋放轉為 cancelled 後，遲到的付款成功 Webhook 到達時，
+    若原訂單的所有座位仍為 available，應於同一交易內復活訂單為 paid 並將座位轉為 sold。
+    """
+    seed_users()
+    user_token = _login_seed(client, "user")
+    admin_token = _login_seed(client, "admin")
+    admin_user = (
+        await db_session.execute(select(User).where(User.email == "admin@flashticket.com"))
+    ).scalar_one()
+    buyer = (
+        await db_session.execute(select(User).where(User.email == "user@flashticket.com"))
+    ).scalar_one()
+
+    event, seats = await _create_live_event_with_seats(db_session, admin_user.id)
+
+    order_resp = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"seat_ids": [seats[0].id, seats[1].id]},
+    ).json()
+    order_id = order_resp["id"]
+    total_amount = order_resp["total_amount"]
+
+    # 模擬逾時並由 Worker 釋放為 cancelled
+    await db_session.execute(
+        text("UPDATE orders SET expires_at = NOW() - INTERVAL '2 minutes' WHERE id = :oid"),
+        {"oid": order_id},
+    )
+    await db_session.commit()
+    assert await release_expired_orders(db_session) == 1
+
+    # 發送遲到的付款成功簽章 Webhook
+    redis = get_redis()
+    wh_id = f"wh_late_revive_{order_id}"
+    await redis.delete(f"webhook:payment:event:{wh_id}")
+
+    raw_body = json.dumps(
+        {
+            "webhook_event_id": wh_id,
+            "order_id": order_id,
+            "payment_status": "succeeded",
+            "amount": str(total_amount),
+        }
+    ).encode("utf-8")
+    ts = str(int(time.time()))
+    sig = compute_webhook_signature(ts, raw_body)
+
+    res = client.post(
+        "/api/v1/payments/webhook",
+        content=raw_body,
+        headers={
+            "Content-Type": "application/json",
+            "X-Webhook-Timestamp": ts,
+            "X-Webhook-Signature": sig,
+        },
+    )
+    assert res.status_code == 200, res.text
+    data = res.json()
+    assert data["action"] == "revived"
+    assert data["order_status"] == "paid"
+    assert data["refund_triggered"] is False
+    assert data["sequence_id"] == 3  # 1: held, 2: released, 3: revived sold
+
+    # 驗證原座位全部轉為 sold 且屬於原買家，order_items 轉回 paid
+    for s in (seats[0], seats[1]):
+        await db_session.refresh(s)
+        assert s.status == SeatStatus.SOLD.value
+        assert s.held_by == buyer.id
+        assert s.expires_at is None
+
+    order_detail = client.get(
+        f"/api/v1/orders/{order_id}",
+        headers={"Authorization": f"Bearer {user_token}"},
+    ).json()
+    assert order_detail["status"] == "paid"
+    assert all(item["status"] == "paid" for item in order_detail["items"])
+
+    # 驗證 Outbox 記錄 revived=True 之 seat_sold 事件
+    revived_outbox = (
+        await db_session.execute(
+            select(EventOutbox).where(
+                EventOutbox.event_id == event.id,
+                EventOutbox.event_type == "seat_sold",
+            )
+        )
+    ).scalar_one()
+    assert revived_outbox.payload["revived"] is True
+    assert revived_outbox.payload["order_id"] == order_id
+
+    # 復活後的座位他人不可再搶購 (409)
+    assert (
+        client.post(
+            f"/api/v1/events/{event.id}/tickets/reserve",
+            headers={"Authorization": f"Bearer {admin_token}"},
+            json={"seat_ids": [seats[0].id]},
+        ).status_code
+        == 409
+    )
+    await redis.delete(f"webhook:payment:event:{wh_id}")
+
+
+@pytest.mark.asyncio
+async def test_late_webhook_triggers_refund_when_any_seat_taken_by_another_user(
+    client, db_session
+):
+    """
+    ★ 關鍵 Q2.1 測試（退款分支與部分佔用全筆退款保證）：
+    訂單逾時釋放後，原 2 張座位中有 1 張已被他人搶走、另 1 張仍為 available；
+    遲到付款成功 Webhook 到達時必須整筆標記為 cancelled_refund_required 觸發退款，
+    不得覆寫他人座位，也不得部分復活剩餘座位。
+    """
+    seed_users()
+    user_token = _login_seed(client, "user")
+    admin_token = _login_seed(client, "admin")
+    admin_user = (
+        await db_session.execute(select(User).where(User.email == "admin@flashticket.com"))
+    ).scalar_one()
+
+    event, seats = await _create_live_event_with_seats(db_session, admin_user.id)
+
+    order_resp = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"seat_ids": [seats[0].id, seats[1].id]},
+    ).json()
+    order_id = order_resp["id"]
+    total_amount = order_resp["total_amount"]
+
+    # 1. 逾時釋放
+    await db_session.execute(
+        text("UPDATE orders SET expires_at = NOW() - INTERVAL '2 minutes' WHERE id = :oid"),
+        {"oid": order_id},
+    )
+    await db_session.commit()
+    assert await release_expired_orders(db_session) == 1
+
+    # 2. 另一位買家 (Admin) 搶走 seats[0]，留下 seats[1] 仍為 available
+    rebook_res = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={"Authorization": f"Bearer {admin_token}"},
+        json={"seat_ids": [seats[0].id]},
+    )
+    assert rebook_res.status_code == 201
+
+    # 3. 遲到付款成功 Webhook 到達 -> 必須整筆轉 cancelled_refund_required
+    redis = get_redis()
+    wh_id_1 = f"wh_late_refund_1_{order_id}"
+    wh_id_2 = f"wh_late_refund_2_{order_id}"
+    await redis.delete(
+        f"webhook:payment:event:{wh_id_1}",
+        f"webhook:payment:event:{wh_id_2}",
+    )
+
+    def _send_webhook(wh_event_id: str):
+        body = json.dumps(
+            {
+                "webhook_event_id": wh_event_id,
+                "order_id": order_id,
+                "payment_status": "succeeded",
+                "amount": str(total_amount),
+            }
+        ).encode("utf-8")
+        ts = str(int(time.time()))
+        sig = compute_webhook_signature(ts, body)
+        return client.post(
+            "/api/v1/payments/webhook",
+            content=body,
+            headers={
+                "Content-Type": "application/json",
+                "X-Webhook-Timestamp": ts,
+                "X-Webhook-Signature": sig,
+            },
+        )
+
+    res1 = _send_webhook(wh_id_1)
+    assert res1.status_code == 200, res1.text
+    d1 = res1.json()
+    assert d1["action"] == "refund_required"
+    assert d1["order_status"] == "cancelled_refund_required"
+    assert d1["refund_triggered"] is True
+
+    # 驗證 seats[0] 仍屬於 Admin (held)，seats[1] 仍為 available（不部分復活）
+    await db_session.refresh(seats[0])
+    await db_session.refresh(seats[1])
+    assert seats[0].status == SeatStatus.HELD.value
+    assert seats[0].held_by == admin_user.id
+    assert seats[1].status == SeatStatus.AVAILABLE.value
+
+    order_detail = client.get(
+        f"/api/v1/orders/{order_id}",
+        headers={"Authorization": f"Bearer {user_token}"},
+    ).json()
+    assert order_detail["status"] == "cancelled_refund_required"
+    assert all(item["status"] == "cancelled" for item in order_detail["items"])
+
+    # 驗證 Outbox 記錄 order_refund_required 事件且標出衝突座位 ID
+    refund_outbox = (
+        await db_session.execute(
+            select(EventOutbox).where(
+                EventOutbox.event_id == event.id,
+                EventOutbox.event_type == "order_refund_required",
+            )
+        )
+    ).scalar_one()
+    assert refund_outbox.payload["order_id"] == order_id
+    assert refund_outbox.payload["conflicting_seat_ids"] == [seats[0].id]
+
+    # 4. 驗證 Worker 消費 order_refund_required Outbox 實際執行模擬自動退款，且重複執行冪等不重複退款
+    from app.payments.service import execute_mock_refund
+    from app.workers.runner import poll_and_relay_outbox
+
+    refund_receipt_key = f"payment:refund:order:{order_id}"
+    await redis.delete(refund_receipt_key)
+
+    relayed = await poll_and_relay_outbox(db_session, redis=redis)
+    assert relayed >= 1
+
+    receipt_raw = await redis.get(refund_receipt_key)
+    assert receipt_raw is not None
+    receipt = json.loads(receipt_raw)
+    assert receipt["order_id"] == order_id
+    assert receipt["status"] == "refunded"
+    assert Decimal(receipt["amount"]) == Decimal(str(total_amount))
+
+    # 重複呼叫退款閘道必須冪等回傳同一筆 refund_id（不重複退款）
+    dup_refund = await execute_mock_refund(
+        order_id=order_id,
+        amount=str(total_amount),
+        webhook_event_id=wh_id_1,
+        redis=redis,
+    )
+    assert dup_refund["duplicate"] is True
+    assert dup_refund["refund_id"] == receipt["refund_id"]
+
+    # 5. 若後續再收到不同 event_id 的遲到 Webhook，應冪等維持 already_refund_required
+    res2 = _send_webhook(wh_id_2)
+    assert res2.status_code == 200, res2.text
+    d2 = res2.json()
+    assert d2["action"] == "already_refund_required"
+    assert d2["order_status"] == "cancelled_refund_required"
+    assert d2["refund_triggered"] is True
+
+    await redis.delete(
+        f"webhook:payment:event:{wh_id_1}",
+        f"webhook:payment:event:{wh_id_2}",
+        refund_receipt_key,
+    )
