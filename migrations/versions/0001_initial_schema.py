@@ -279,14 +279,14 @@ def upgrade() -> None:
       "ix_order_items_order_id", "order_items", ["order_id"], unique=False
   )
 
-  # [DELIBERATELY DISABLED FOR Q1.3 EXPERIMENT] PARTIAL UNIQUE INDEX
-  # op.create_index(
-  #     "uq_active_seat_order",
-  #     "order_items",
-  #     ["seat_id"],
-  #     unique=True,
-  #     postgresql_where=sa.text("status IN ('held', 'paid')"),
-  # )
+  # PARTIAL UNIQUE INDEX: Crucial second line of defense against overselling!
+  op.create_index(
+      "uq_active_seat_order",
+      "order_items",
+      ["seat_id"],
+      unique=True,
+      postgresql_where=sa.text("status IN ('held', 'paid')"),
+  )
 
   # 7. event_outbox table
   op.create_table(
@@ -496,7 +496,7 @@ def downgrade() -> None:
   op.drop_table("import_jobs")
   op.drop_index("ix_outbox_pending_relay", table_name="event_outbox")
   op.drop_table("event_outbox")
-  # [DELIBERATELY DISABLED FOR Q1.3 EXPERIMENT] op.drop_index("uq_active_seat_order", table_name="order_items")
+  op.drop_index("uq_active_seat_order", table_name="order_items")
   op.drop_table("order_items")
   op.drop_index("ix_orders_pending_expiry", table_name="orders")
   op.drop_index("ix_orders_user_created", table_name="orders")

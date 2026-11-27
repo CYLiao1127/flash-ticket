@@ -476,13 +476,13 @@ class OrderItem(Base):
       ),
       # 1. 保證同一張訂單內不重複加入相同座位
       UniqueConstraint("order_id", "seat_id", name="uq_order_item_seat"),
-      # 2. [DELIBERATELY DISABLED FOR Q1.3 EXPERIMENT] 跨訂單防超賣部分唯一索引
-      # Index(
-      #     "uq_active_seat_order",
-      #     "seat_id",
-      #     unique=True,
-      #     postgresql_where=text("status IN ('held', 'paid')"),
-      # ),
+      # 2. 跨訂單防超賣部分唯一索引 (Partial Unique Index)
+      Index(
+          "uq_active_seat_order",
+          "seat_id",
+          unique=True,
+          postgresql_where=text("status IN ('held', 'paid')"),
+      ),
       Index("ix_order_items_order_id", "order_id"),
   )
 

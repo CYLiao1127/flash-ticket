@@ -70,6 +70,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - **AI 輔助開發日誌與除錯覆盤**：[AI_USAGE.md](file:///Users/liao/Documents/flash-ticket/AI_USAGE.md)（記錄真實開發中 AI 產出錯誤與修正案例）
 - **Token 即時作廢與認證相依層效能基準量測 (Q5.1)**：[docs/evidence/q5_token_benchmark.txt](file:///Users/liao/Documents/flash-ticket/docs/evidence/q5_token_benchmark.txt)（包含無狀態 JWT、Redis 快速失敗攔截、完整 `get_current_user` 與資料庫直查之延遲百分位數對比報告）
 - **大量座位匯入與經 Nginx 無緩衝 SSE 實測紀錄**：[docs/evidence/c08_seat_import_and_sse.txt](file:///Users/liao/Documents/flash-ticket/docs/evidence/c08_seat_import_and_sse.txt)（100,000 列 PostgreSQL `COPY` 耗時與經 Nginx 逐幀即時送達實測）
+- **雙重防超賣破壞性實驗與超賣復現存證 (Q1.3)**：[docs/evidence/q1_deliberate_failure.log](file:///Users/liao/Documents/flash-ticket/docs/evidence/q1_deliberate_failure.log)（實驗 A 拔除部分唯一索引仍擋住 30 併發；實驗 B 拔除條件更新重現 30× 超賣後於 Commit 14 還原）
 
 ### 全鏈路分散式追蹤 (Distributed Tracing Architecture)
 系統全面支援以 `X-Request-ID` 為核心的端到端分散式鏈路追蹤：
@@ -151,7 +152,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 ### 7. 驗證與壓力測試
 
 - [ ] 一行指令執行全部測試（單元、整合、併發）
-- [ ] 刻意破壞鎖機制的超賣復現存證（Q1 驗證）
+- [x] 刻意破壞鎖機制的超賣復現存證（Q1 驗證，Commit 13 `4c7af9b` → Commit 14 還原）
 - [ ] 情境 A 壓測（3,000 VU / 10,000 座位持續 60 秒）
 - [ ] 情境 B 壓測（2,000 條即時 WebSocket 連線訂閱）
 - [ ] 壓測後數據一致性校驗腳本（售出數 == 訂單票券數）
