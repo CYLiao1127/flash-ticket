@@ -28,6 +28,7 @@ const bookingServer5xx = new Rate("booking_server_5xx");
 const bookingLatency = new Trend("booking_latency_ms");
 
 export const options = {
+  summaryTrendStats: ["avg", "min", "med", "max", "p(90)", "p(95)", "p(99)"],
   scenarios: {
     flash_sale_rush: {
       executor: "ramping-vus",

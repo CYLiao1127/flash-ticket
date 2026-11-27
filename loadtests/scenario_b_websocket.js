@@ -28,6 +28,7 @@ const wsConnectSuccessRate = new Rate("ws_connect_success_rate");
 const wsHandshakeMs = new Trend("ws_handshake_ms");
 
 export const options = {
+  summaryTrendStats: ["avg", "min", "med", "max", "p(90)", "p(95)", "p(99)"],
   scenarios: {
     ws_subscribers: {
       executor: "ramping-vus",

@@ -1,0 +1,8 @@
+[
+  {"zone_code": "VIP", "row_label": "特一排", "seat_number": "01"},
+  {"zone_code": "VIP", "row_label": "特一排", "seat_number": "02"},
+  {"zone_code": "A", "row_label": "B1-A", "seat_number": "101"},
+  {"zone_code": "A", "row_label": "B1-A", "seat_number": "102"},
+  {"zone_code": "B", "row_label": "二樓看台", "seat_number": "201"},
+  {"zone_code": "B", "row_label": "二樓看台", "seat_number": "202"}
+]
