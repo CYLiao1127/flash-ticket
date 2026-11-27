@@ -162,6 +162,8 @@ def test_dynamic_role_matrix_enforcement(client):
 
         for method in sorted(policy.methods):
             req_kwargs = {"json": {}} if method in {"POST", "PUT", "PATCH"} else {}
+            if route.path.endswith("/alerts/stream"):
+                req_kwargs["params"] = {"max_events": 0}
 
             # 1. 匿名存取必須被拒絕 (401 Unauthorized)
             anon_res = client.request(method, target_path, **req_kwargs)

@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import request_id_ctx, setup_logging
 from app.core.redis import close_redis, get_redis
 from app.events.import_service import recover_stale_import_jobs
+from app.monitoring.alerts import evaluate_and_dispatch_alerts
 from app.monitoring.collector import (
     flush_access_logs_batch,
     flush_per_second_metrics,
@@ -111,27 +112,43 @@ async def poll_and_relay_outbox(
     return published_count
 
 
+async def run_worker_cycle(session: AsyncSession) -> dict:
+    """執行單一輪背景 Worker 週期任務（Outbox 派發、逾時回收、監控入庫、即時異常告警）"""
+    processed = await poll_and_relay_outbox(session)
+    if processed > 0:
+        logger.debug(f"Relayed {processed} outbox events.")
+    recovered = await recover_stale_import_jobs(session)
+    if recovered > 0:
+        logger.warning(f"Recovered {recovered} stale import jobs as failed.")
+    released = await release_expired_orders(session)
+    if released > 0:
+        logger.info(f"Released {released} expired unpaid orders via DB clock.")
+    flushed_logs = await flush_access_logs_batch(session)
+    if flushed_logs > 0:
+        logger.debug(f"Flushed {flushed_logs} access logs to PostgreSQL.")
+    flushed_metrics = await flush_per_second_metrics(session)
+    if flushed_metrics > 0:
+        logger.debug(f"Flushed {flushed_metrics} per-second metric buckets.")
+    alerts = await evaluate_and_dispatch_alerts(session)
+    if alerts:
+        logger.warning(f"Dispatched {len(alerts)} realtime monitoring alerts.")
+    return {
+        "outbox_relayed": processed,
+        "stale_imports_recovered": recovered,
+        "expired_orders_released": released,
+        "access_logs_flushed": flushed_logs,
+        "metric_buckets_flushed": flushed_metrics,
+        "alerts_dispatched": len(alerts),
+    }
+
+
 async def main():
     logger.info("Background worker service initialized and running.")
     try:
         while True:
             try:
                 async with AsyncSessionLocal() as session:
-                    processed = await poll_and_relay_outbox(session)
-                    if processed > 0:
-                        logger.debug(f"Relayed {processed} outbox events.")
-                    recovered = await recover_stale_import_jobs(session)
-                    if recovered > 0:
-                        logger.warning(f"Recovered {recovered} stale import jobs as failed.")
-                    released = await release_expired_orders(session)
-                    if released > 0:
-                        logger.info(f"Released {released} expired unpaid orders via DB clock.")
-                    flushed_logs = await flush_access_logs_batch(session)
-                    if flushed_logs > 0:
-                        logger.debug(f"Flushed {flushed_logs} access logs to PostgreSQL.")
-                    flushed_metrics = await flush_per_second_metrics(session)
-                    if flushed_metrics > 0:
-                        logger.debug(f"Flushed {flushed_metrics} per-second metric buckets.")
+                    await run_worker_cycle(session)
             except Exception as e:
                 logger.error(f"Worker encountered error: {e}", exc_info=True)
 

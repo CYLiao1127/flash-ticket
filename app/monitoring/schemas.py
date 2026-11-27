@@ -65,3 +65,37 @@ class RequestTraceResponse(BaseModel):
     request_id: str
     access_logs: List[AccessLogItemResponse]
     outbox_events: List[TraceOutboxItemResponse]
+
+
+class AlertItemResponse(BaseModel):
+    alert_id: str
+    rule: str
+    severity: str
+    title: str
+    message: str
+    metric_value: float
+    threshold: float
+    details: Dict[str, Any]
+    triggered_at: datetime
+
+
+class AlertThresholdsResponse(BaseModel):
+    window_seconds: int
+    error_rate_threshold: float
+    min_requests_for_error_rate: int
+    p99_latency_ms_threshold: float
+    outbox_pending_threshold: int
+    booking_failure_rate_threshold: float
+    min_booking_attempts: int
+    cooldown_seconds: int
+
+
+class AlertListResponse(BaseModel):
+    items: List[AlertItemResponse]
+    total: int
+    thresholds: AlertThresholdsResponse
+
+
+class AlertEvaluateResponse(BaseModel):
+    dispatched: List[AlertItemResponse]
+    dispatched_count: int
