@@ -31,7 +31,6 @@ class Settings(BaseSettings):
   )
 
   # Redis
-  REDIS_HOST: str = "redis"
   REDIS_PORT: int = 6379
   REDIS_URL: str = "redis://redis:6379/0"
 
@@ -43,6 +42,7 @@ class Settings(BaseSettings):
   ALERT_ERROR_RATE_THRESHOLD: float = 0.05
   ALERT_P99_LATENCY_MS: int = 2000
   ALERT_OUTBOX_LAG_THRESHOLD: int = 1000
+  ALERT_BOOKING_FAILURE_RATE_THRESHOLD: float = 0.90
 
   # Timezone
   TIMEZONE: str = "Asia/Taipei"

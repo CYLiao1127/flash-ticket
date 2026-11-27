@@ -140,8 +140,8 @@ async def test_webhook_hmac_signature_5min_replay_and_event_idempotency(
         == 400
     )
 
-    # 3. 超過 5 分鐘防重放視窗（過去 301 秒與未來 301 秒）-> 400
-    for stale_ts in (now_ts - 301, now_ts + 301):
+    # 3. 超過 5 分鐘防重放視窗（過去 310 秒與未來 310 秒，避免 1 秒跨秒邊界抖動）-> 400
+    for stale_ts in (now_ts - 310, now_ts + 310):
         stale_sig = compute_webhook_signature(str(stale_ts), raw_body)
         stale_res = client.post(
             "/api/v1/payments/webhook",

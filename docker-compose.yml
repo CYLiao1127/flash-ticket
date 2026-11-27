@@ -3,12 +3,16 @@ x-app-env: &app-env
   LOG_LEVEL: ${LOG_LEVEL:-INFO}
   DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/${POSTGRES_DB:-flash_ticket}
   SYNC_DATABASE_URL: postgresql://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/${POSTGRES_DB:-flash_ticket}
-  REDIS_URL: redis://redis:6379/0
+  REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
   SECRET_KEY: ${SECRET_KEY:-dev-super-secret-key-change-in-production-min-32-chars}
   JWT_ALGORITHM: ${JWT_ALGORITHM:-HS256}
   ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-60}
   PAYMENT_WEBHOOK_SECRET: ${PAYMENT_WEBHOOK_SECRET:-mock-payment-signature-secret-key-32chars}
   PAYMENT_TIMEOUT_SECONDS: ${PAYMENT_TIMEOUT_SECONDS:-600}
+  ALERT_ERROR_RATE_THRESHOLD: ${ALERT_ERROR_RATE_THRESHOLD:-0.05}
+  ALERT_P99_LATENCY_MS: ${ALERT_P99_LATENCY_MS:-2000}
+  ALERT_OUTBOX_LAG_THRESHOLD: ${ALERT_OUTBOX_LAG_THRESHOLD:-1000}
+  ALERT_BOOKING_FAILURE_RATE_THRESHOLD: ${ALERT_BOOKING_FAILURE_RATE_THRESHOLD:-0.90}
   TIMEZONE: ${TIMEZONE:-Asia/Taipei}
 
 services:
@@ -20,7 +24,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-flash_password}
       POSTGRES_DB: ${POSTGRES_DB:-flash_ticket}
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "${POSTGRES_HOST_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./scripts/init_test_db.sh:/docker-entrypoint-initdb.d/init_test_db.sh:ro
@@ -62,7 +66,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: always
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: ["uvicorn", "app.main:app", "--host", "${APP_HOST:-0.0.0.0}", "--port", "8000"]
     deploy:
       resources:
         limits:
@@ -91,7 +95,7 @@ services:
       context: .
       dockerfile: Dockerfile
     restart: always
-    command: uvicorn app.main:app --host 0.0.0.0 --port 8000
+    command: ["uvicorn", "app.main:app", "--host", "${APP_HOST:-0.0.0.0}", "--port", "8000"]
     deploy:
       resources:
         limits:
@@ -161,6 +165,7 @@ services:
       POSTGRES_DB: flash_ticket_test
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/flash_ticket_test
       SYNC_DATABASE_URL: postgresql://${POSTGRES_USER:-flash_user}:${POSTGRES_PASSWORD:-flash_password}@postgres:5432/flash_ticket_test
+      REDIS_URL: redis://redis:6379/1
     depends_on:
       postgres:
         condition: service_healthy

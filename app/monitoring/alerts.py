@@ -24,6 +24,7 @@ from typing import Any, Dict, List, Optional
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.config import settings
 from app.core.redis import get_redis
 from app.models import EventOutbox, OutboxStatus, SystemMetric
 from app.tickets.metrics import get_recent_ticket_metrics_window
@@ -41,11 +42,11 @@ class AlertThresholds:
     """異常告警規則門檻設定"""
 
     window_seconds: int = 60
-    error_rate_threshold: float = 0.05  # 5xx > 5%
+    error_rate_threshold: float = settings.ALERT_ERROR_RATE_THRESHOLD
     min_requests_for_error_rate: int = 10
-    p99_latency_ms_threshold: float = 2000.0  # p99 > 2s
-    outbox_pending_threshold: int = 1000  # Outbox pending > 1000
-    booking_failure_rate_threshold: float = 0.90  # 購票失敗率 > 90% (Q6.2)
+    p99_latency_ms_threshold: float = float(settings.ALERT_P99_LATENCY_MS)
+    outbox_pending_threshold: int = settings.ALERT_OUTBOX_LAG_THRESHOLD
+    booking_failure_rate_threshold: float = settings.ALERT_BOOKING_FAILURE_RATE_THRESHOLD
     min_booking_attempts: int = 10
     cooldown_seconds: int = 60
 

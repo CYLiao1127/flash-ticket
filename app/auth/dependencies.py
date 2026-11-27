@@ -85,19 +85,19 @@ async def get_current_user(
     user: Optional[User] = None
 
     if cached_version is not None:
-        # Cache Hit：優先比對 Redis 快取版本，不符即快速拒絕
-        if cached_version != token_version:
+        # DB 版本遞增後寫入 Redis。較新的快取版本可直接拒絕舊 Token；
+        # 若快取版本較舊，則必須回源確認，避免誤拒剛簽發的有效 Token。
+        if cached_version > token_version:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="Token has been revoked",
                 headers={"WWW-Authenticate": "Bearer"},
             )
-        # 取得使用者資料實例，並以 DB 實體版本為最終真實來源防線
         stmt = select(User).where(User.id == user_id)
         res = await db.execute(stmt)
         user = res.scalar_one_or_none()
         if user and user.token_version != token_version:
-            # 偵測到 Redis 快取陳舊，以 DB 為準同步修正快取並立即拒絕
+            # DB 為準：拒絕舊 Token，並盡力修正 Redis 快取
             try:
                 await set_cached_token_version(redis, user.id, user.token_version)
             except Exception:
@@ -107,6 +107,12 @@ async def get_current_user(
                 detail="Token has been revoked",
                 headers={"WWW-Authenticate": "Bearer"},
             )
+        if user and cached_version != user.token_version:
+            # Redis 落後於 DB：修復快取後允許 DB 版本相符的有效 Token 繼續
+            try:
+                await set_cached_token_version(redis, user.id, user.token_version)
+            except Exception:
+                pass
     else:
         # Cache Miss 或 Redis 暫時故障：回源 DB 查詢並回填 Redis
         stmt = select(User).where(User.id == user_id)

@@ -3,7 +3,8 @@ from starlette.testclient import TestClient
 from sqlalchemy import select
 from app.models import User, UserRole
 from app.auth.seed import seed_users
-from app.auth.service import deactivate_user
+from app.auth.service import deactivate_user, get_token_version_key
+from app.auth.security import create_access_token
 from app.core.redis import get_redis
 
 
@@ -142,3 +143,45 @@ def test_invalid_and_tampered_token(client):
 
     # 3. 偽造或遭竄改的 JWT
     assert client.get("/api/v1/auth/me", headers={"Authorization": "Bearer fake.jwt.token"}).status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_stale_redis_token_version_does_not_reject_current_token(
+    client, db_session
+):
+    email = "stale_cache_test@flashticket.com"
+    password = "Password123!"
+    assert client.post(
+        "/api/v1/auth/register", json={"email": email, "password": password}
+    ).status_code == 201
+    old_token = client.post(
+        "/api/v1/auth/login", json={"email": email, "password": password}
+    ).json()["access_token"]
+
+    user = (await db_session.execute(select(User).where(User.email == email))).scalar_one()
+    old_version = user.token_version
+    user.token_version += 1
+    await db_session.commit()
+
+    redis = get_redis()
+    await redis.set(get_token_version_key(user.id), str(old_version), ex=60)
+    current_token = create_access_token(
+        {
+            "sub": str(user.id),
+            "role": user.role,
+            "token_version": user.token_version,
+        }
+    )
+
+    res_current = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {current_token}"},
+    )
+    assert res_current.status_code == 200
+    assert await redis.get(get_token_version_key(user.id)) == str(user.token_version)
+
+    res_old = client.get(
+        "/api/v1/auth/me",
+        headers={"Authorization": f"Bearer {old_token}"},
+    )
+    assert res_old.status_code == 401
