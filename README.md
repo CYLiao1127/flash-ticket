@@ -89,7 +89,9 @@ make verify-consistency
 - **高併發壓力測試與一致性驗證報告**：[LOADTEST.md](file:///Users/liao/Documents/flash-ticket/LOADTEST.md)（情境 A/B 真實 k6 量測數據、WebSocket 連線池瓶頸修復前後對比與六大不變量校驗結果）
 
 ### 全鏈路分散式追蹤 (Distributed Tracing Architecture)
+
 系統全面支援以 `X-Request-ID` 為核心的端到端分散式鏈路追蹤：
+
 1. **HTTP 閘道層**：`request_tracing_middleware` 接收或生成 32 碼 UUID Trace ID，注入非同步安全之 `contextvars`，於回應標頭 `X-Request-ID` 返回客戶端。
 2. **結構化日誌**：`TracingFilter` 自動為每一筆 LogRecord 注入 `[instance_id]` 與 `[request_id]`，輸出標準格式：
    `[timestamp] [level] [instance_id] [request_id] [logger:line] message`
@@ -97,7 +99,9 @@ make verify-consistency
 4. **非同步背景 Worker**：Worker 以 `FOR UPDATE SKIP LOCKED` 認領待處理事件，綁定 `request_id` 至協程 ContextVar，發布至 Redis Pub/Sub 頻道成功後才將狀態標記為 `published`，延續 HTTP 至 Worker 的請求追蹤鏈路。
 
 ### 宣告式授權與動態路由覆蓋防護 (Declarative RBAC & CI Guard)
+
 為防止新增 API 端點時遺漏權限檢查（Q5.3）：
+
 1. **強制授權宣告**：所有業務端點必須掛載 `get_current_user` / `require_roles(...)` 依賴，或顯式標註 `@public_endpoint(reason=...)` 並登錄於公開白名單。
 2. **動態矩陣自動化驗證**：[tests/test_authorization.py](file:///Users/liao/Documents/flash-ticket/tests/test_authorization.py) 於 CI 階段自動遍歷 `app.routes` 解析依賴樹，針對每條受保護路由驗證匿名（401）、越權（403）與授權放行行為（角色矩陣驗證權限守門，業務邏輯則由各模組功能測試獨立覆蓋）。
 3. **GitHub Actions CI 自動執行**：[.github/workflows/ci.yml](file:///Users/liao/Documents/flash-ticket/.github/workflows/ci.yml) 於每次 `push` / `pull_request` 至 `main` 分支時自動啟動容器化測試套件，確保上述授權矩陣與 Alembic 驗證不會被略過。
@@ -155,10 +159,10 @@ make verify-consistency
 
 ### 5. 報表匯出
 
-- [ ] 活動銷售 Excel 報表匯出（摘要、區域彙總、訂單明細）
-- [ ] 50 萬筆訂單於 512MB 記憶體上限內串流匯出（`xlsxwriter` Constant Memory）
-- [ ] 指定時區顯示（`Asia/Taipei`）與金額數值型別
-- [ ] 匯出權限校驗（User 僅限自己活動、Viewer/Admin 可看全部）
+- [x] 活動銷售 Excel 報表匯出（`GET /api/v1/reports/exports`，含 `Summary` 摘要／區域彙總與 `Details` 訂單明細）
+- [x] 50 萬筆訂單於 512MB 記憶體上限內串流匯出（磁碟備援 `xlsxwriter(constant_memory=True)` + PostgreSQL Server-Side Cursor，實測見 [`docs/evidence/q9_memory_profile.txt`](docs/evidence/q9_memory_profile.txt)）
+- [x] 指定時區顯示（`Asia/Taipei`）與金額 Excel 數值型別
+- [x] 匯出權限校驗（User 僅限自己活動、Viewer/Admin 可看全部）
 
 ### 6. 前台與監控介面
 

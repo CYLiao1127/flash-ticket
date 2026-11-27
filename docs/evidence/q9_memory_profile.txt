@@ -1,0 +1,61 @@
+# Commit 23: Streaming Excel Export Memory Profile (500,000 Rows under 512 MiB RAM)
+
+Container Memory Limit (Kernel cgroup v2 verified on api-1):
+  docker-compose.yml: deploy.resources.limits.memory = 512M
+  /sys/fs/cgroup/memory.max = 536870912 bytes (512.0 MiB)
+
+Implementation Architecture:
+  - PostgreSQL Server-Side Named Cursor (`report_details_server_cursor`, `itersize=batch_size`, default 1000)
+  - Disk-backed `tempfile.mkstemp(suffix=".xlsx")` + `xlsxwriter.Workbook(tmp_path, {"constant_memory": True, "strings_to_urls": False})` (never `BytesIO` or `in_memory=True`)
+  - SQL aggregation (`COUNT`, `SUM`, `GROUP BY event_id, zone_code`) for `Summary` worksheet
+  - Timezone conversion to `Asia/Taipei` (+ header timezone notation) and numeric `write_number(..., "#,##0.00")` for all monetary columns
+  - 64KB chunked `StreamingResponse` with `X-Report-Rows` header and `finally: os.remove(tmp_path)` cleanup
+
+--------------------------------------------------------------------------------
+Run 1: In-Process Streaming Export Benchmark (500,000 rows)
+Command:
+  docker compose exec -T api-1 python scripts/benchmark_report_export.py --rows 500000 --batch-size 1000
+
+Measured Output (2026-11-27):
+=== Streaming Excel Export Memory Benchmark ===
+rows_exported: 500000
+batch_size: 1000
+seed_seconds: 21.76
+export_seconds: 38.95
+xlsx_size_mb: 28.74
+rss_before_mb: 78.56
+rss_after_mb: 23.31
+kernel_vmhwm_peak_mb: 81.28
+
+--------------------------------------------------------------------------------
+Run 2: End-to-End HTTP Endpoint Streaming Export Benchmark (500,000 rows)
+Command:
+  docker compose exec -T api-1 python scripts/benchmark_report_export.py --rows 500000 --batch-size 1000 --via-http
+
+Measured Output (2026-11-27):
+=== Streaming Excel Export Memory Benchmark ===
+mode: http_endpoint
+rows_exported: 500000
+xml_details_data_rows: 500000
+batch_size: 1000
+seed_seconds: 24.37
+export_seconds: 40.9
+xlsx_size_mb: 28.83
+rss_before_mib: 83.04
+rss_after_mib: 86.59
+kernel_vmhwm_peak_mib: 86.59
+http_status: 200
+x_report_rows_header: 500000
+has_summary_and_details_sheets: True
+container_cgroup_memory_max_bytes: 536870912
+container_cgroup_memory_max_mib: 512.0
+container_cgroup_anon_before_mib: 85.12
+container_cgroup_anon_peak_sampled_mib: 95.68
+container_cgroup_anon_after_mib: 94.93
+container_cgroup_oom_kill_count: 0
+
+Verification Summary:
+  - Kernel cgroup limit verified: `/sys/fs/cgroup/memory.max = 536870912` bytes (exact 512.0 MiB).
+  - Independent 500,000-row verification: HTTP `X-Report-Rows: 500000` AND streaming XML `<row ` tag count on downloaded `xl/worksheets/sheet2.xml` = `500000` data rows (excluding header row).
+  - Container non-reclaimable process RAM (`cgroup memory.stat anon`, including both uvicorn server + benchmark client inside `api-1`): peaked at `95.68 MiB` (+10.56 MiB over `85.12 MiB` baseline, << `512.0 MiB` limit) with `oom_kill = 0`.
+  - Earlier `memory.peak = 537022464` (512.14 MiB) included reclaimable Linux filesystem page cache (`memory.stat file`) temporarily buffered during disk writes and synchronously reclaimed by the kernel before OOM.

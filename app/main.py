@@ -13,6 +13,7 @@ from app.payments.router import orders_router, payments_router
 from app.monitoring.router import admin_monitoring_router
 from app.realtime.hub import event_hub
 from app.realtime.router import realtime_router, ws_router
+from app.reports.router import reports_router
 from app.monitoring.collector import (
     ActiveConnectionASGIMiddleware,
     record_http_observation,
@@ -71,6 +72,7 @@ app.include_router(payments_router)
 app.include_router(admin_monitoring_router)
 app.include_router(realtime_router)
 app.include_router(ws_router)
+app.include_router(reports_router)
 
 
 @app.middleware("http")
