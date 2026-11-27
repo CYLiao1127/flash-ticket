@@ -348,9 +348,14 @@ async def reserve_specific_seats(
                 detail="One or more requested seats do not exist in this event",
             )
 
-        # 3. 依固定升冪順序逐一執行條件原子更新 (第一道防線)
+        # 3. [DELIBERATELY DISABLED FOR Q1.3 EXPERIMENT B] 拔除條件原子更新，改為無鎖先讀後寫以重現超賣
         held_rows: List[Tuple[int, str, str, str, object]] = []
-        update_sql = text(
+        read_sql = text(
+            "SELECT id, zone_code, row_label, seat_number, status "
+            "FROM seats "
+            "WHERE id = :seat_id AND event_id = :event_id"
+        )
+        unsafe_update_sql = text(
             "UPDATE seats "
             "SET status = :held_status, "
             "    held_by = :user_id, "
@@ -359,29 +364,30 @@ async def reserve_specific_seats(
             "    updated_at = NOW() "
             "WHERE id = :seat_id "
             "  AND event_id = :event_id "
-            "  AND status = :avail_status "
             "RETURNING id, zone_code, row_label, seat_number, expires_at"
         )
         for sid in sorted_seat_ids:
-            res = await db.execute(
-                update_sql,
-                {
-                    "held_status": SeatStatus.HELD.value,
-                    "user_id": current_user.id,
-                    "hold_mins": SEAT_HOLD_MINUTES,
-                    "seat_id": sid,
-                    "event_id": event_id,
-                    "avail_status": SeatStatus.AVAILABLE.value,
-                },
-            )
-            row = res.first()
-            if row is None:
+            pre = (
+                await db.execute(read_sql, {"seat_id": sid, "event_id": event_id})
+            ).first()
+            if pre is None or pre[4] != SeatStatus.AVAILABLE.value:
                 await db.rollback()
                 await record_ticket_metric("seat_conflict", event_id=event_id)
                 raise HTTPException(
                     status_code=status.HTTP_409_CONFLICT,
                     detail="One or more requested seats are no longer available",
                 )
+            res = await db.execute(
+                unsafe_update_sql,
+                {
+                    "held_status": SeatStatus.HELD.value,
+                    "user_id": current_user.id,
+                    "hold_mins": SEAT_HOLD_MINUTES,
+                    "seat_id": sid,
+                    "event_id": event_id,
+                },
+            )
+            row = res.first()
             held_rows.append((row[0], row[1], row[2], row[3], row[4]))
 
         # 4. 查詢分區票價並建立 Order / OrderItem (第二道物理防線 uq_active_seat_order)

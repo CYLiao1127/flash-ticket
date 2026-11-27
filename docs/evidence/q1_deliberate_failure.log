@@ -1,0 +1,72 @@
+================================================================================
+Flash Ticket - Q1.3 破壞性實驗存證 (Deliberate Failure Reproduction Log)
+================================================================================
+Date (UTC): 2026-11-27T06:44:34Z
+Test Target: tests/test_concurrency.py::test_high_concurrency_anti_overselling_reserve_and_allocate_consistency
+Environment: Docker Compose (PostgreSQL 16 + Redis 7 + Python 3.12 / pytest 8.3.4)
+
+--------------------------------------------------------------------------------
+[實驗 A] 僅拔除第二道防線 (uq_active_seat_order 部分唯一索引)，保留第一道防線 (條件原子更新)
+--------------------------------------------------------------------------------
+Modified:
+  - app/models.py: disabled Index("uq_active_seat_order", ...)
+  - migrations/versions/0001_initial_schema.py: disabled op.create_index("uq_active_seat_order", ...)
+Kept Intact:
+  - app/tickets/service.py: UPDATE seats SET status = 'held' ... WHERE id = :seat_id AND event_id = :event_id AND status = 'available' RETURNING ...
+
+Command:
+  docker compose --profile testing run --rm test pytest -v tests/test_concurrency.py::test_high_concurrency_anti_overselling_reserve_and_allocate_consistency
+
+Observed Result:
+  ============================= test session starts ==============================
+  platform linux -- Python 3.12.16, pytest-8.3.4, pluggy-1.7.0 -- /usr/local/bin/python3.12
+  collected 1 item
+
+  tests/test_concurrency.py::test_high_concurrency_anti_overselling_reserve_and_allocate_consistency PASSED [100%]
+  ======================== 1 passed, 2 warnings in 1.59s =========================
+
+Conclusion (Experiment A):
+  Even with uq_active_seat_order dropped from PostgreSQL, 30 concurrent buyers racing
+  for 1 VIP seat still produced exactly 1 winner and 29 conflicts (409).
+  Defense Layer 1 (conditional atomic UPDATE) holds independently.
+
+--------------------------------------------------------------------------------
+[實驗 B] 同時拔除第二道防線 (uq_active_seat_order) 與第一道防線 (條件原子更新 -> 無鎖先讀後寫)
+--------------------------------------------------------------------------------
+Modified:
+  - app/models.py & migrations/versions/0001_initial_schema.py: uq_active_seat_order disabled
+  - app/tickets/service.py (reserve_specific_seats): replaced conditional atomic UPDATE
+    with naive read-then-write (SELECT status ... followed by unconditional UPDATE seats WHERE id = :seat_id)
+
+Command:
+  docker compose --profile testing run --rm test pytest -v --tb=short tests/test_concurrency.py::test_high_concurrency_anti_overselling_reserve_and_allocate_consistency
+
+Observed Result (REAL OVERSELLING REPRODUCED — 30/30 BUYERS BOOKED THE SAME 1 SEAT):
+  ============================= test session starts ==============================
+  platform linux -- Python 3.12.16, pytest-8.3.4, pluggy-1.7.0 -- /usr/local/bin/python3.12
+  collected 1 item
+
+  tests/test_concurrency.py::test_high_concurrency_anti_overselling_reserve_and_allocate_consistency FAILED [100%]
+
+  =================================== FAILURES ===================================
+  ___ test_high_concurrency_anti_overselling_reserve_and_allocate_consistency ____
+  tests/test_concurrency.py:146: in test_high_concurrency_anti_overselling_reserve_and_allocate_consistency
+      assert len(winners_1) == 1
+  E   AssertionError: assert 30 == 1
+  E    +  where 30 = len([
+  E        OrderReservationResponse(id=18, event_id=1, user_id=2, status='pending', sequence_id=18, items=[OrderItemDetailResponse(id=18, seat_id=1, zone_code='VIP', row_label='1', seat_number='1', price=Decimal('5800.00'), status='held')]),
+  E        OrderReservationResponse(id=17, event_id=1, user_id=3, status='pending', sequence_id=17, items=[OrderItemDetailResponse(id=17, seat_id=1, zone_code='VIP', row_label='1', seat_number='1', price=Decimal('5800.00'), status='held')]),
+  E        OrderReservationResponse(id=2,  event_id=1, user_id=4, status='pending', ... seat_id=1 ...),
+  E        OrderReservationResponse(id=24, event_id=1, user_id=6, status='pending', sequence_id=24, items=[OrderItemDetailResponse(id=24, seat_id=1, zone_code='VIP', row_label='1', seat_number='1', price=Decimal('5800.00'), status='held')]),
+  E        OrderReservationResponse(id=30, event_id=1, user_id=7, status='pending', sequence_id=30, items=[OrderItemDetailResponse(id=30, seat_id=1, zone_code='VIP', row_label='1', seat_number='1', price=Decimal('5800.00'), status='held')]),
+  E        ... (30 total orders all referencing seat_id=1)
+  E      ])
+  =========================== short test summary info ============================
+  FAILED tests/test_concurrency.py::test_high_concurrency_anti_overselling_reserve_and_allocate_consistency - AssertionError: assert 30 == 1
+  ======================== 1 failed, 2 warnings in 1.62s =========================
+
+Conclusion (Experiment B):
+  All 30 concurrent buyers read status='available' before any transaction committed,
+  then overwrote seats(id=1) and inserted 30 active order_items for the exact same seat_id=1.
+  The concurrency test suite immediately caught the 30x overselling (assert 30 == 1).
+  All protections are restored in the immediately following Commit 14.
