@@ -693,3 +693,29 @@ class SystemMetric(Base):
   __table_args__ = (
       UniqueConstraint("timestamp", name="uq_metrics_timestamp"),
   )
+
+
+# ==========================================
+# 11. 指標批次寫入冪等紀錄 (MetricFlushClaim)
+# ==========================================
+class MetricFlushClaim(Base):
+  """秒級指標 inflight 認領冪等表，防止 Worker 於 DB commit 後、清除 Redis 前崩潰造成重複計數"""
+
+  __tablename__ = "metric_flush_claims"
+
+  claim_id = Column(
+      String(64),
+      primary_key=True,
+      comment="Redis inflight 認領冪等鍵 (<ts>:<claim_id>)",
+  )
+  bucket_timestamp = Column(
+      DateTime(timezone=True),
+      nullable=False,
+      index=True,
+      comment="對應之秒級桶時間戳",
+  )
+  created_at = Column(
+      DateTime(timezone=True),
+      server_default=text("CURRENT_TIMESTAMP"),
+      nullable=False,
+  )

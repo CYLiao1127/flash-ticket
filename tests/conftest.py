@@ -83,7 +83,7 @@ async def db_session():
         await conn.execute(
             text(
                 "TRUNCATE TABLE users, events, zones, seats, orders, order_items, "
-                "event_outbox, import_jobs, access_logs, metrics_per_second "
+                "event_outbox, import_jobs, access_logs, metrics_per_second, metric_flush_claims "
                 "RESTART IDENTITY CASCADE;"
             )
         )
@@ -95,7 +95,7 @@ async def db_session():
         await conn.execute(
             text(
                 "TRUNCATE TABLE users, events, zones, seats, orders, order_items, "
-                "event_outbox, import_jobs, access_logs, metrics_per_second "
+                "event_outbox, import_jobs, access_logs, metrics_per_second, metric_flush_claims "
                 "RESTART IDENTITY CASCADE;"
             )
         )

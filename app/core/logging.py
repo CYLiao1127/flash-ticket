@@ -5,13 +5,30 @@ from contextvars import ContextVar
 from typing import Optional
 from app.config import settings
 
-# 全域非同步安全的 Request ID ContextVar
+# 全域非同步安全的 Request ID 與認證 User ID Holder ContextVar
+# 使用可變 dict 作為 holder，確保 Starlette BaseHTTPMiddleware 子協程內寫入之 user_id 可被父協程讀取
 request_id_ctx: ContextVar[str] = ContextVar("request_id", default="-")
+request_user_holder_ctx: ContextVar[Optional[dict]] = ContextVar(
+    "request_user_holder", default=None
+)
 
 
 def get_request_id() -> str:
     """獲取當前協程上下文之 Request ID"""
     return request_id_ctx.get()
+
+
+def set_request_user_id(user_id: Optional[int]) -> None:
+    """於當前請求上下文紀錄已認證之 User ID"""
+    holder = request_user_holder_ctx.get()
+    if holder is not None:
+        holder["user_id"] = user_id
+
+
+def get_request_user_id() -> Optional[int]:
+    """獲取當前協程上下文已認證之 User ID"""
+    holder = request_user_holder_ctx.get()
+    return holder.get("user_id") if holder is not None else None
 
 
 class TracingFilter(logging.Filter):

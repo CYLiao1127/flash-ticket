@@ -252,9 +252,11 @@ erDiagram
   - `errors` (JSONB) 記錄所有異常列之原始行號與錯誤原因（含帳號停用取消原因）。
   - **建立者停用防護 (Q5.2)**：帳號遭停用時，尚未開始執行的 `pending` 任務將立即轉為 `cancelled`；執行中的任務除於各 `COPY` 批次前檢查建立者啟用狀態外，亦在同一個 `COPY` 提交事務內對建立者 `users` 列執行 `SELECT is_active FROM users WHERE id = $1 FOR SHARE` 與停用寫鎖（`UPDATE users`）嚴格序列化，確保「停用完成後絕不再提交該使用者的匯入」，若已停用則立即回滾該次匯入事務並標記為 `cancelled`，不殘留半套座位。
 
-### 9. `access_logs` & `metrics_per_second` (日誌與監控)
-- `access_logs`：記錄經過系統的每筆請求，包含 `request_id`、IP、路徑、狀態碼與毫秒級延遲。
-- `metrics_per_second`：每秒聚合之 RPS、錯誤率、p50/p95/p99 延遲與在線連線數，由背景 Worker 批次寫入資料庫持久化。
+### 9. `access_logs`、`metrics_per_second` & `metric_flush_claims` (日誌與監控)
+- `access_logs`：記錄經過系統的每筆請求，包含 `request_id`、認證後 `user_id`、IP、路徑、狀態碼與毫秒級延遲；由 HTTP Middleware 非阻塞寫入 Redis 佇列，再由背景 Worker 批次入庫。
+- `metrics_per_second`：每秒聚合之 RPS、5xx 錯誤數、p50/p95/p99 延遲與叢集即時在線連線數（涵蓋 HTTP、長連線 SSE 與 WebSocket），搭配 `uq_metrics_timestamp` 與 `ON CONFLICT (timestamp) DO UPDATE` 處理多副本時鐘偏差（Q6.3）。
+- `metric_flush_claims`：秒級指標批次寫入的冪等表（`claim_id` 主鍵），與 `metrics_per_second` Upsert 位於**同一個 PostgreSQL 交易**內提交，達成端對端 Exactly-Once 持久化（防 DB commit 前崩潰遺失，亦防 DB commit 後、清除 Redis 前崩潰重複計數）。
+  - **容量與保留策略取捨**：未入庫的 Redis 秒桶與 `inflight` 暫存鍵設為 **24 小時 TTL**（防止 Worker／DB 異常多日導致 Redis OOM 波及核心搶票鎖），`metric_flush_claims` 則保留 **48 小時**並每 5 分鐘背景清理過期紀錄（嚴格大於 Redis 24h TTL，確保 24 小時內恢復皆不重複計數）。
 
 ---
 

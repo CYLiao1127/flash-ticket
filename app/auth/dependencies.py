@@ -148,6 +148,9 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
+    from app.core.logging import set_request_user_id
+
+    set_request_user_id(user.id)
     return user
 
 

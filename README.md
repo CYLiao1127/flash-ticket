@@ -130,12 +130,12 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 
 ### 4. 即時監控與維運
 
-- [ ] 每秒系統指標收集（RPS、p50/p95/p99 延遲、錯誤率、即時連線數）
-- [ ] 指標批次寫入資料庫與多副本時鐘偏差分析
-- [ ] 存取日誌批次寫入資料庫
+- [x] 每秒系統指標收集（RPS、p50/p95/p99 延遲、錯誤率、即時連線數）
+- [x] 指標批次寫入資料庫與多副本時鐘偏差分析（Q6.3）
+- [x] 存取日誌批次寫入資料庫
 - [ ] 系統面與業務面異常即時告警（5xx > 5%, p99 > 2s, Outbox > 1000, 業務失敗率 > 90%）
-- [ ] `X-Request-ID` 全鏈路追蹤與 Admin 跨服務日誌查詢
-- [ ] Admin 使用者管理（修改角色、啟用/停用狀態）
+- [x] `X-Request-ID` 全鏈路追蹤與 Admin 跨服務日誌查詢（`/api/v1/admin/monitoring/trace/{request_id}`）
+- [x] Admin 使用者管理（修改角色、啟用/停用狀態）
 
 ### 5. 報表匯出
 

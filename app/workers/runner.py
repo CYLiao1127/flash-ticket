@@ -17,6 +17,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import request_id_ctx, setup_logging
 from app.core.redis import close_redis, get_redis
 from app.events.import_service import recover_stale_import_jobs
+from app.monitoring.collector import (
+    flush_access_logs_batch,
+    flush_per_second_metrics,
+)
 from app.payments.service import execute_mock_refund, release_expired_orders
 from app.models import EventOutbox, OutboxStatus
 from app.db import AsyncSessionLocal
@@ -122,6 +126,12 @@ async def main():
                     released = await release_expired_orders(session)
                     if released > 0:
                         logger.info(f"Released {released} expired unpaid orders via DB clock.")
+                    flushed_logs = await flush_access_logs_batch(session)
+                    if flushed_logs > 0:
+                        logger.debug(f"Flushed {flushed_logs} access logs to PostgreSQL.")
+                    flushed_metrics = await flush_per_second_metrics(session)
+                    if flushed_metrics > 0:
+                        logger.debug(f"Flushed {flushed_metrics} per-second metric buckets.")
             except Exception as e:
                 logger.error(f"Worker encountered error: {e}", exc_info=True)
 
