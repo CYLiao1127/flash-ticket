@@ -120,7 +120,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - [x] 區域配位（`SELECT FOR UPDATE SKIP LOCKED`，1~4 張）
 - [x] 單人每場活動限購 4 張（原子級 `pg_advisory_xact_lock`）
 - [x] 雙重防超賣保證（PostgreSQL 條件更新 + 部分唯一索引 `uq_active_seat_order`）
-- [ ] 冪等性處理（Idempotency Key：成功 200、處理中 409、參數不符 422）
+- [x] 冪等性處理（Idempotency Key：成功 200、處理中 409、參數不符 422）與原子 Outbox 活動序號 (`events.last_seq`)
 - [x] 5% 服務費精確四捨五入（`Decimal` `ROUND_HALF_UP`）
 - [ ] 模擬金流服務與 HMAC Webhook 簽章回呼
 - [ ] 逾時未付款自動釋放（DB-Clock `NOW()` 冪等釋放）

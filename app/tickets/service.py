@@ -12,13 +12,14 @@
 """
 
 from decimal import Decimal, ROUND_HALF_UP
-from typing import Dict, List, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.outbox import create_outbox_event
 from app.models import (
     Event,
     EventStatus,
@@ -30,6 +31,13 @@ from app.models import (
     SeatStatus,
     User,
     Zone,
+)
+from app.tickets.idempotency import (
+    acquire_idempotency_slot,
+    build_request_fingerprint,
+    complete_idempotency_slot,
+    normalize_idempotency_key,
+    release_idempotency_slot,
 )
 from app.tickets.metrics import record_ticket_metric
 from app.tickets.schemas import OrderItemDetailResponse, OrderReservationResponse
@@ -134,12 +142,16 @@ async def _assert_within_per_user_limit(
 def _build_reservation_response(
     order: Order,
     item_seat_pairs: List[Tuple[OrderItem, str, str, str]],
+    sequence_id: Optional[int] = None,
+    is_idempotent_replay: bool = False,
 ) -> OrderReservationResponse:
     return OrderReservationResponse(
         id=order.id,
         event_id=order.event_id,
         user_id=order.user_id,
         status=order.status,
+        idempotency_key=order.idempotency_key,
+        sequence_id=sequence_id,
         total_ticket_amount=Decimal(order.total_ticket_amount),
         service_fee=Decimal(order.service_fee),
         total_amount=Decimal(order.total_amount),
@@ -157,6 +169,114 @@ def _build_reservation_response(
             )
             for item, zone_code, row_label, seat_number in item_seat_pairs
         ],
+        is_idempotent_replay=is_idempotent_replay,
+    )
+
+
+async def _allocate_event_sequence(db: AsyncSession, event_id: int) -> int:
+    """
+    在交易最後一步原子遞增並取得活動專屬單調序號 (Q4.1)。
+    嚴格遵守鎖順序 advisory_lock -> seats -> events.last_seq 以最小化熱點列鎖時間；
+    若交易回滾則序號一併回滾，確保零跳號。
+    """
+    res = await db.execute(
+        text(
+            "UPDATE events "
+            "SET last_seq = last_seq + 1 "
+            "WHERE id = :event_id "
+            "RETURNING last_seq"
+        ),
+        {"event_id": event_id},
+    )
+    return int(res.scalar_one())
+
+
+def _build_seat_held_outbox_payload(
+    order: Order,
+    item_seat_pairs: List[Tuple[OrderItem, str, str, str]],
+) -> Dict[str, object]:
+    return {
+        "order_id": order.id,
+        "user_id": order.user_id,
+        "event_id": order.event_id,
+        "expires_at": order.expires_at.isoformat(),
+        "seats": [
+            {
+                "seat_id": item.seat_id,
+                "zone_code": zone_code,
+                "row_label": row_label,
+                "seat_number": seat_number,
+                "status": SeatStatus.HELD.value,
+            }
+            for item, zone_code, row_label, seat_number in item_seat_pairs
+        ],
+    }
+
+
+async def _lookup_existing_idempotent_order(
+    db: AsyncSession,
+    idempotency_key: str,
+    user_id: int,
+    event_id: int,
+    expected_seat_ids: Optional[List[int]] = None,
+    expected_zone_code: Optional[str] = None,
+    expected_quantity: Optional[int] = None,
+) -> Optional[OrderReservationResponse]:
+    """當 Redis 冪等快取過期或未命中時，以資料庫 Order.idempotency_key 作為持久層兜底驗證"""
+    existing_order = (
+        await db.execute(
+            select(Order).where(Order.idempotency_key == idempotency_key)
+        )
+    ).scalar_one_or_none()
+    if existing_order is None:
+        return None
+
+    rows = (
+        await db.execute(
+            select(OrderItem, Seat.zone_code, Seat.row_label, Seat.seat_number)
+            .join(Seat, Seat.id == OrderItem.seat_id)
+            .where(OrderItem.order_id == existing_order.id)
+            .order_by(OrderItem.id.asc())
+        )
+    ).all()
+    item_seat_pairs = [(r[0], r[1], r[2], r[3]) for r in rows]
+
+    mismatch = (
+        existing_order.user_id != user_id
+        or existing_order.event_id != event_id
+    )
+    if not mismatch and expected_seat_ids is not None:
+        actual_seat_ids = sorted(item.seat_id for item, _, _, _ in item_seat_pairs)
+        mismatch = actual_seat_ids != sorted(expected_seat_ids)
+    if not mismatch and expected_zone_code is not None and expected_quantity is not None:
+        mismatch = (
+            len(item_seat_pairs) != expected_quantity
+            or any(z != expected_zone_code for _, z, _, _ in item_seat_pairs)
+        )
+
+    if mismatch:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail="Idempotency-Key was already used with different request parameters",
+        )
+
+    seq_row = (
+        await db.execute(
+            text(
+                "SELECT sequence_id FROM event_outbox "
+                "WHERE event_id = :eid AND event_type = 'seat_held' "
+                "  AND payload->>'order_id' = :oid "
+                "ORDER BY id DESC LIMIT 1"
+            ),
+            {"eid": event_id, "oid": str(existing_order.id)},
+        )
+    ).first()
+    seq_id = int(seq_row[0]) if seq_row is not None else None
+    return _build_reservation_response(
+        existing_order,
+        item_seat_pairs,
+        sequence_id=seq_id,
+        is_idempotent_replay=True,
     )
 
 
@@ -165,127 +285,199 @@ async def reserve_specific_seats(
     event_id: int,
     current_user: User,
     seat_ids: List[int],
+    idempotency_key: Optional[str] = None,
+    on_before_commit: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> OrderReservationResponse:
     """
-    指定選位購買（條件原子更新 + 單人單場限購 4 張 advisory lock）。
-    依 seat_id 升冪排序鎖定座位，避免多座位並發指定選位發生死結。
+    指定選位購買（條件原子更新 + 單人單場限購 4 張 advisory lock + 原子 Outbox 序號 + Idempotency-Key）。
+    鎖順序嚴格固定：pg_advisory_xact_lock -> seats (seat_id ASC) -> events.last_seq。
     """
     sorted_seat_ids = sorted(seat_ids)
-    await _assert_event_purchasable(db, event_id)
-
-    # 1. 使用者-活動層級交易鎖，先序列化限購檢查
-    await _acquire_user_event_advisory_lock(db, current_user.id, event_id)
-    await _assert_within_per_user_limit(
-        db, current_user.id, event_id, len(sorted_seat_ids)
+    norm_key = normalize_idempotency_key(idempotency_key)
+    fingerprint = (
+        build_request_fingerprint(
+            current_user.id,
+            event_id,
+            "reserve",
+            {"seat_ids": sorted_seat_ids},
+        )
+        if norm_key is not None
+        else None
     )
 
-    # 2. 確認指定座位皆隸屬此活動
-    existing_ids_rows = await db.execute(
-        select(Seat.id).where(
-            Seat.event_id == event_id,
-            Seat.id.in_(sorted_seat_ids),
-        )
-    )
-    existing_ids = {r[0] for r in existing_ids_rows.all()}
-    if len(existing_ids) != len(sorted_seat_ids):
-        await db.rollback()
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail="One or more requested seats do not exist in this event",
+    acquired_idem_lock = False
+    if norm_key is not None and fingerprint is not None:
+        cached, acquired_idem_lock = await acquire_idempotency_slot(norm_key, fingerprint)
+        if cached is not None:
+            cached.is_idempotent_replay = True
+            return cached
+
+    try:
+        if norm_key is not None and fingerprint is not None:
+            db_cached = await _lookup_existing_idempotent_order(
+                db,
+                norm_key,
+                user_id=current_user.id,
+                event_id=event_id,
+                expected_seat_ids=sorted_seat_ids,
+            )
+            if db_cached is not None:
+                await complete_idempotency_slot(norm_key, fingerprint, db_cached)
+                return db_cached
+
+        await _assert_event_purchasable(db, event_id)
+
+        # 1. 使用者-活動層級交易鎖，先序列化限購檢查
+        await _acquire_user_event_advisory_lock(db, current_user.id, event_id)
+        await _assert_within_per_user_limit(
+            db, current_user.id, event_id, len(sorted_seat_ids)
         )
 
-    # 3. 依固定升冪順序逐一執行條件原子更新 (第一道防線)
-    held_rows: List[Tuple[int, str, str, str, object]] = []
-    update_sql = text(
-        "UPDATE seats "
-        "SET status = :held_status, "
-        "    held_by = :user_id, "
-        "    expires_at = NOW() + make_interval(mins => :hold_mins), "
-        "    version = version + 1, "
-        "    updated_at = NOW() "
-        "WHERE id = :seat_id "
-        "  AND event_id = :event_id "
-        "  AND status = :avail_status "
-        "RETURNING id, zone_code, row_label, seat_number, expires_at"
-    )
-    for sid in sorted_seat_ids:
-        res = await db.execute(
-            update_sql,
-            {
-                "held_status": SeatStatus.HELD.value,
-                "user_id": current_user.id,
-                "hold_mins": SEAT_HOLD_MINUTES,
-                "seat_id": sid,
-                "event_id": event_id,
-                "avail_status": SeatStatus.AVAILABLE.value,
-            },
+        # 2. 確認指定座位皆隸屬此活動
+        existing_ids_rows = await db.execute(
+            select(Seat.id).where(
+                Seat.event_id == event_id,
+                Seat.id.in_(sorted_seat_ids),
+            )
         )
-        row = res.first()
-        if row is None:
+        existing_ids = {r[0] for r in existing_ids_rows.all()}
+        if len(existing_ids) != len(sorted_seat_ids):
             await db.rollback()
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="One or more requested seats do not exist in this event",
+            )
+
+        # 3. 依固定升冪順序逐一執行條件原子更新 (第一道防線)
+        held_rows: List[Tuple[int, str, str, str, object]] = []
+        update_sql = text(
+            "UPDATE seats "
+            "SET status = :held_status, "
+            "    held_by = :user_id, "
+            "    expires_at = NOW() + make_interval(mins => :hold_mins), "
+            "    version = version + 1, "
+            "    updated_at = NOW() "
+            "WHERE id = :seat_id "
+            "  AND event_id = :event_id "
+            "  AND status = :avail_status "
+            "RETURNING id, zone_code, row_label, seat_number, expires_at"
+        )
+        for sid in sorted_seat_ids:
+            res = await db.execute(
+                update_sql,
+                {
+                    "held_status": SeatStatus.HELD.value,
+                    "user_id": current_user.id,
+                    "hold_mins": SEAT_HOLD_MINUTES,
+                    "seat_id": sid,
+                    "event_id": event_id,
+                    "avail_status": SeatStatus.AVAILABLE.value,
+                },
+            )
+            row = res.first()
+            if row is None:
+                await db.rollback()
+                await record_ticket_metric("seat_conflict", event_id=event_id)
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail="One or more requested seats are no longer available",
+                )
+            held_rows.append((row[0], row[1], row[2], row[3], row[4]))
+
+        # 4. 查詢分區票價並建立 Order / OrderItem (第二道物理防線 uq_active_seat_order)
+        zone_codes = {r[1] for r in held_rows}
+        zone_rows = await db.execute(
+            select(Zone.zone_code, Zone.price).where(
+                Zone.event_id == event_id,
+                Zone.zone_code.in_(zone_codes),
+            )
+        )
+        zone_prices: Dict[str, Decimal] = {
+            r[0]: Decimal(r[1]) for r in zone_rows.all()
+        }
+
+        subtotal = sum((zone_prices[r[1]] for r in held_rows), Decimal("0.00"))
+        service_fee = calculate_service_fee(subtotal)
+        total_amount = subtotal + service_fee
+        order_expires_at = held_rows[0][4]
+
+        order = Order(
+            user_id=current_user.id,
+            event_id=event_id,
+            total_ticket_amount=subtotal,
+            service_fee=service_fee,
+            total_amount=total_amount,
+            status=OrderStatus.PENDING.value,
+            idempotency_key=norm_key,
+            expires_at=order_expires_at,
+        )
+        db.add(order)
+
+        try:
+            await db.flush()
+
+            item_seat_pairs: List[Tuple[OrderItem, str, str, str]] = []
+            for sid, z_code, r_label, s_num, _ in held_rows:
+                item = OrderItem(
+                    order_id=order.id,
+                    seat_id=sid,
+                    price=zone_prices[z_code],
+                    status=OrderItemStatus.HELD.value,
+                )
+                db.add(item)
+                item_seat_pairs.append((item, z_code, r_label, s_num))
+
+            await db.flush()
+
+            # 5. 交易最後一步取得活動專屬單調序號並同交易寫入 Outbox (Q4.1)
+            seq_id = await _allocate_event_sequence(db, event_id)
+            outbox_event = create_outbox_event(
+                event_id=event_id,
+                sequence_id=seq_id,
+                event_type="seat_held",
+                payload=_build_seat_held_outbox_payload(order, item_seat_pairs),
+            )
+            db.add(outbox_event)
+
+            if on_before_commit is not None:
+                await on_before_commit()
+
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            if norm_key is not None and "uq_orders_idempotency_key" in str(exc):
+                db_cached = await _lookup_existing_idempotent_order(
+                    db,
+                    norm_key,
+                    user_id=current_user.id,
+                    event_id=event_id,
+                    expected_seat_ids=sorted_seat_ids,
+                )
+                if db_cached is not None and fingerprint is not None:
+                    await complete_idempotency_slot(norm_key, fingerprint, db_cached)
+                    return db_cached
             await record_ticket_metric("seat_conflict", event_id=event_id)
             raise HTTPException(
                 status_code=status.HTTP_409_CONFLICT,
-                detail="One or more requested seats are no longer available",
+                detail="One or more requested seats are already held or sold",
             )
-        held_rows.append((row[0], row[1], row[2], row[3], row[4]))
 
-    # 4. 查詢分區票價並建立 Order / OrderItem (第二道物理防線 uq_active_seat_order)
-    zone_codes = {r[1] for r in held_rows}
-    zone_rows = await db.execute(
-        select(Zone.zone_code, Zone.price).where(
-            Zone.event_id == event_id,
-            Zone.zone_code.in_(zone_codes),
+        await db.refresh(order)
+        for item, _, _, _ in item_seat_pairs:
+            await db.refresh(item)
+
+        response_obj = _build_reservation_response(
+            order, item_seat_pairs, sequence_id=seq_id, is_idempotent_replay=False
         )
-    )
-    zone_prices: Dict[str, Decimal] = {
-        r[0]: Decimal(r[1]) for r in zone_rows.all()
-    }
+        if norm_key is not None and fingerprint is not None:
+            await complete_idempotency_slot(norm_key, fingerprint, response_obj)
 
-    subtotal = sum((zone_prices[r[1]] for r in held_rows), Decimal("0.00"))
-    service_fee = calculate_service_fee(subtotal)
-    total_amount = subtotal + service_fee
-    order_expires_at = held_rows[0][4]
-
-    order = Order(
-        user_id=current_user.id,
-        event_id=event_id,
-        total_ticket_amount=subtotal,
-        service_fee=service_fee,
-        total_amount=total_amount,
-        status=OrderStatus.PENDING.value,
-        expires_at=order_expires_at,
-    )
-    db.add(order)
-    await db.flush()
-
-    item_seat_pairs: List[Tuple[OrderItem, str, str, str]] = []
-    for sid, z_code, r_label, s_num, _ in held_rows:
-        item = OrderItem(
-            order_id=order.id,
-            seat_id=sid,
-            price=zone_prices[z_code],
-            status=OrderItemStatus.HELD.value,
-        )
-        db.add(item)
-        item_seat_pairs.append((item, z_code, r_label, s_num))
-
-    try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        await record_ticket_metric("seat_conflict", event_id=event_id)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="One or more requested seats are already held or sold",
-        )
-
-    await db.refresh(order)
-    for item, _, _, _ in item_seat_pairs:
-        await db.refresh(item)
-
-    await record_ticket_metric("reservation_success", event_id=event_id)
-    return _build_reservation_response(order, item_seat_pairs)
+        await record_ticket_metric("reservation_success", event_id=event_id)
+        return response_obj
+    except Exception:
+        if acquired_idem_lock and norm_key is not None and fingerprint is not None:
+            await release_idempotency_slot(norm_key, fingerprint)
+        raise
 
 
 async def allocate_zone_seats(
@@ -294,108 +486,184 @@ async def allocate_zone_seats(
     current_user: User,
     zone_code: str,
     quantity: int,
+    idempotency_key: Optional[str] = None,
+    on_before_commit: Optional[Callable[[], Awaitable[None]]] = None,
 ) -> OrderReservationResponse:
     """
-    區域自動配位購買（pg_advisory_xact_lock + SELECT ... FOR UPDATE SKIP LOCKED）。
-    僅在區域可鎖定數量滿足 quantity 時一次鎖定並建立訂單，否則完整回滾不殘留部分鎖位。
+    區域自動配位購買（pg_advisory_xact_lock + SELECT ... FOR UPDATE SKIP LOCKED + 原子 Outbox 序號 + Idempotency-Key）。
+    鎖順序嚴格固定：pg_advisory_xact_lock -> seats (SKIP LOCKED) -> events.last_seq。
     """
-    await _assert_event_purchasable(db, event_id)
-
-    zone = (
-        await db.execute(
-            select(Zone).where(
-                Zone.event_id == event_id,
-                Zone.zone_code == zone_code,
-            )
+    norm_key = normalize_idempotency_key(idempotency_key)
+    fingerprint = (
+        build_request_fingerprint(
+            current_user.id,
+            event_id,
+            "allocate",
+            {"zone_code": zone_code, "quantity": quantity},
         )
-    ).scalar_one_or_none()
-    if zone is None:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"Zone '{zone_code}' not found in event",
-        )
-
-    # 1. 使用者-活動層級交易鎖，先序列化限購檢查
-    await _acquire_user_event_advisory_lock(db, current_user.id, event_id)
-    await _assert_within_per_user_limit(db, current_user.id, event_id, quantity)
-
-    # 2. 自動配位：FOR UPDATE SKIP LOCKED 跳過已被其他交易鎖定中的座位列
-    alloc_stmt = (
-        select(Seat)
-        .where(
-            Seat.event_id == event_id,
-            Seat.zone_code == zone_code,
-            Seat.status == SeatStatus.AVAILABLE.value,
-        )
-        .order_by(Seat.row_label.asc(), Seat.seat_number.asc(), Seat.id.asc())
-        .limit(quantity)
-        .with_for_update(skip_locked=True)
+        if norm_key is not None
+        else None
     )
-    allocated_seats = list((await db.execute(alloc_stmt)).scalars().all())
-    if len(allocated_seats) < quantity:
-        await db.rollback()
-        await record_ticket_metric("zone_sold_out", event_id=event_id)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail=f"Insufficient available seats in zone '{zone_code}'",
-        )
 
-    # 3. 使用資料庫伺服器時鐘計算鎖位逾時時間並更新已鎖定之座位
-    order_expires_at = (
-        await db.execute(
-            text("SELECT NOW() + make_interval(mins => :hold_mins)"),
-            {"hold_mins": SEAT_HOLD_MINUTES},
-        )
-    ).scalar_one()
-
-    for seat in allocated_seats:
-        seat.status = SeatStatus.HELD.value
-        seat.held_by = current_user.id
-        seat.expires_at = order_expires_at
-        seat.version += 1
-        seat.updated_at = func.now()
-
-    unit_price = Decimal(zone.price)
-    subtotal = unit_price * quantity
-    service_fee = calculate_service_fee(subtotal)
-    total_amount = subtotal + service_fee
-
-    order = Order(
-        user_id=current_user.id,
-        event_id=event_id,
-        total_ticket_amount=subtotal,
-        service_fee=service_fee,
-        total_amount=total_amount,
-        status=OrderStatus.PENDING.value,
-        expires_at=order_expires_at,
-    )
-    db.add(order)
-    await db.flush()
-
-    item_seat_pairs: List[Tuple[OrderItem, str, str, str]] = []
-    for seat in allocated_seats:
-        item = OrderItem(
-            order_id=order.id,
-            seat_id=seat.id,
-            price=unit_price,
-            status=OrderItemStatus.HELD.value,
-        )
-        db.add(item)
-        item_seat_pairs.append((item, seat.zone_code, seat.row_label, seat.seat_number))
+    acquired_idem_lock = False
+    if norm_key is not None and fingerprint is not None:
+        cached, acquired_idem_lock = await acquire_idempotency_slot(norm_key, fingerprint)
+        if cached is not None:
+            cached.is_idempotent_replay = True
+            return cached
 
     try:
-        await db.commit()
-    except IntegrityError:
-        await db.rollback()
-        await record_ticket_metric("seat_conflict", event_id=event_id)
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="One or more allocated seats are already held or sold",
+        if norm_key is not None and fingerprint is not None:
+            db_cached = await _lookup_existing_idempotent_order(
+                db,
+                norm_key,
+                user_id=current_user.id,
+                event_id=event_id,
+                expected_zone_code=zone_code,
+                expected_quantity=quantity,
+            )
+            if db_cached is not None:
+                await complete_idempotency_slot(norm_key, fingerprint, db_cached)
+                return db_cached
+
+        await _assert_event_purchasable(db, event_id)
+
+        zone = (
+            await db.execute(
+                select(Zone).where(
+                    Zone.event_id == event_id,
+                    Zone.zone_code == zone_code,
+                )
+            )
+        ).scalar_one_or_none()
+        if zone is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Zone '{zone_code}' not found in event",
+            )
+
+        # 1. 使用者-活動層級交易鎖，先序列化限購檢查
+        await _acquire_user_event_advisory_lock(db, current_user.id, event_id)
+        await _assert_within_per_user_limit(db, current_user.id, event_id, quantity)
+
+        # 2. 自動配位：FOR UPDATE SKIP LOCKED 跳過已被其他交易鎖定中的座位列
+        alloc_stmt = (
+            select(Seat)
+            .where(
+                Seat.event_id == event_id,
+                Seat.zone_code == zone_code,
+                Seat.status == SeatStatus.AVAILABLE.value,
+            )
+            .order_by(Seat.row_label.asc(), Seat.seat_number.asc(), Seat.id.asc())
+            .limit(quantity)
+            .with_for_update(skip_locked=True)
         )
+        allocated_seats = list((await db.execute(alloc_stmt)).scalars().all())
+        if len(allocated_seats) < quantity:
+            await db.rollback()
+            await record_ticket_metric("zone_sold_out", event_id=event_id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"Insufficient available seats in zone '{zone_code}'",
+            )
 
-    await db.refresh(order)
-    for item, _, _, _ in item_seat_pairs:
-        await db.refresh(item)
+        # 3. 使用資料庫伺服器時鐘計算鎖位逾時時間並更新已鎖定之座位
+        order_expires_at = (
+            await db.execute(
+                text("SELECT NOW() + make_interval(mins => :hold_mins)"),
+                {"hold_mins": SEAT_HOLD_MINUTES},
+            )
+        ).scalar_one()
 
-    await record_ticket_metric("reservation_success", event_id=event_id)
-    return _build_reservation_response(order, item_seat_pairs)
+        for seat in allocated_seats:
+            seat.status = SeatStatus.HELD.value
+            seat.held_by = current_user.id
+            seat.expires_at = order_expires_at
+            seat.version += 1
+            seat.updated_at = func.now()
+
+        unit_price = Decimal(zone.price)
+        subtotal = unit_price * quantity
+        service_fee = calculate_service_fee(subtotal)
+        total_amount = subtotal + service_fee
+
+        order = Order(
+            user_id=current_user.id,
+            event_id=event_id,
+            total_ticket_amount=subtotal,
+            service_fee=service_fee,
+            total_amount=total_amount,
+            status=OrderStatus.PENDING.value,
+            idempotency_key=norm_key,
+            expires_at=order_expires_at,
+        )
+        db.add(order)
+
+        try:
+            await db.flush()
+
+            item_seat_pairs: List[Tuple[OrderItem, str, str, str]] = []
+            for seat in allocated_seats:
+                item = OrderItem(
+                    order_id=order.id,
+                    seat_id=seat.id,
+                    price=unit_price,
+                    status=OrderItemStatus.HELD.value,
+                )
+                db.add(item)
+                item_seat_pairs.append(
+                    (item, seat.zone_code, seat.row_label, seat.seat_number)
+                )
+
+            await db.flush()
+
+            # 4. 交易最後一步取得活動專屬單調序號並同交易寫入 Outbox (Q4.1)
+            seq_id = await _allocate_event_sequence(db, event_id)
+            outbox_event = create_outbox_event(
+                event_id=event_id,
+                sequence_id=seq_id,
+                event_type="seat_held",
+                payload=_build_seat_held_outbox_payload(order, item_seat_pairs),
+            )
+            db.add(outbox_event)
+
+            if on_before_commit is not None:
+                await on_before_commit()
+
+            await db.commit()
+        except IntegrityError as exc:
+            await db.rollback()
+            if norm_key is not None and "uq_orders_idempotency_key" in str(exc):
+                db_cached = await _lookup_existing_idempotent_order(
+                    db,
+                    norm_key,
+                    user_id=current_user.id,
+                    event_id=event_id,
+                    expected_zone_code=zone_code,
+                    expected_quantity=quantity,
+                )
+                if db_cached is not None and fingerprint is not None:
+                    await complete_idempotency_slot(norm_key, fingerprint, db_cached)
+                    return db_cached
+            await record_ticket_metric("seat_conflict", event_id=event_id)
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="One or more allocated seats are already held or sold",
+            )
+
+        await db.refresh(order)
+        for item, _, _, _ in item_seat_pairs:
+            await db.refresh(item)
+
+        response_obj = _build_reservation_response(
+            order, item_seat_pairs, sequence_id=seq_id, is_idempotent_replay=False
+        )
+        if norm_key is not None and fingerprint is not None:
+            await complete_idempotency_slot(norm_key, fingerprint, response_obj)
+
+        await record_ticket_metric("reservation_success", event_id=event_id)
+        return response_obj
+    except Exception:
+        if acquired_idem_lock and norm_key is not None and fingerprint is not None:
+            await release_idempotency_slot(norm_key, fingerprint)
+        raise

@@ -1,7 +1,7 @@
 """核心搶票與業務統計 API 路由"""
 
 from typing import Optional
-from fastapi import APIRouter, Depends, Query, status
+from fastapi import APIRouter, Depends, Header, Query, Response, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth.dependencies import require_roles
@@ -24,34 +24,63 @@ admin_tickets_router = APIRouter(prefix="/api/v1/admin/tickets", tags=["Admin - 
     "/{event_id}/tickets/reserve",
     response_model=OrderReservationResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="指定座位選位預訂（限購 4 張、條件原子更新防超賣）",
+    summary="指定座位選位預訂（限購 4 張、條件原子更新防超賣、支援 Idempotency-Key）",
 )
 async def reserve_seats_endpoint(
     event_id: int,
     req: ReserveSeatsRequest,
+    response: Response,
+    idempotency_key: Optional[str] = Header(
+        None,
+        alias="Idempotency-Key",
+        description="選填：冪等鍵（相同請求重送回傳 200 快取、處理中回傳 409、參數不符回傳 422）",
+    ),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.USER)),
     db: AsyncSession = Depends(get_db),
 ):
-    """僅限 Admin / User 針對已發布活動指定 1~4 個座位鎖位預訂，受單人單場限購 4 張與雙重防超賣保護"""
-    return await reserve_specific_seats(db, event_id, current_user, req.seat_ids)
+    """僅限 Admin / User 針對已發布且開賣中活動指定 1~4 個座位鎖位預訂，並原子寫入 Outbox"""
+    result = await reserve_specific_seats(
+        db,
+        event_id,
+        current_user,
+        req.seat_ids,
+        idempotency_key=idempotency_key,
+    )
+    if result.is_idempotent_replay:
+        response.status_code = status.HTTP_200_OK
+    return result
 
 
 @router.post(
     "/{event_id}/tickets/allocate",
     response_model=OrderReservationResponse,
     status_code=status.HTTP_201_CREATED,
-    summary="區域自動配位預訂（FOR UPDATE SKIP LOCKED、限購 4 張）",
+    summary="區域自動配位預訂（FOR UPDATE SKIP LOCKED、限購 4 張、支援 Idempotency-Key）",
 )
 async def allocate_seats_endpoint(
     event_id: int,
     req: AutoAllocateSeatsRequest,
+    response: Response,
+    idempotency_key: Optional[str] = Header(
+        None,
+        alias="Idempotency-Key",
+        description="選填：冪等鍵（相同請求重送回傳 200 快取、處理中回傳 409、參數不符回傳 422）",
+    ),
     current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.USER)),
     db: AsyncSession = Depends(get_db),
 ):
-    """僅限 Admin / User 針對已發布活動指定區域自動配位 1~4 張，受單人單場限購 4 張與 SKIP LOCKED 保護"""
-    return await allocate_zone_seats(
-        db, event_id, current_user, req.zone_code, req.quantity
+    """僅限 Admin / User 針對已發布且開賣中活動自動配位 1~4 張，並原子寫入 Outbox"""
+    result = await allocate_zone_seats(
+        db,
+        event_id,
+        current_user,
+        req.zone_code,
+        req.quantity,
+        idempotency_key=idempotency_key,
     )
+    if result.is_idempotent_replay:
+        response.status_code = status.HTTP_200_OK
+    return result
 
 
 @admin_tickets_router.get(

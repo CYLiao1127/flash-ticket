@@ -582,3 +582,285 @@ async def test_sale_window_enforcement_and_metrics_redis_fallback(
         "zone_sold_out": 4,
         "limit_exceeded": 0,
     }
+
+
+@pytest.mark.asyncio
+async def test_atomic_outbox_event_sequencing_and_zero_gaps_on_rollback(client, db_session):
+    """
+    ★ 關鍵 Q4.1 驗證：
+    1. 搶票鎖位成功時於同一 DB 事務內取得 events.last_seq 並寫入 event_outbox（攜帶 X-Request-ID）。
+    2. 交易因衝突或提交前例外回滾時，events.last_seq 一併回滾且不產生孤兒 Outbox 事件，保證序號嚴格連續無跳號。
+    """
+    from app.models import EventOutbox, OutboxStatus
+
+    seed_users()
+    user_token = _login_seed(client, "user")
+    admin_user = (
+        await db_session.execute(select(User).where(User.email == "admin@flashticket.com"))
+    ).scalar_one()
+    buyer = (
+        await db_session.execute(select(User).where(User.email == "user@flashticket.com"))
+    ).scalar_one()
+
+    event, seats = await _create_published_event_with_seats(
+        db_session,
+        admin_user.id,
+        title="Atomic Outbox Seq Event",
+        zones_spec=[("A", "A 區", Decimal("1000.00"), 6)],
+    )
+    await _reset_metrics_everywhere([event.id])
+
+    # 1. 第 1 筆指定選位成功 -> sequence_id == 1，且 X-Request-ID 寫入 Outbox payload
+    res1 = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "X-Request-ID": "trace-c11-seq-001",
+        },
+        json={"seat_ids": [seats[0].id]},
+    )
+    assert res1.status_code == 201, res1.text
+    order1 = res1.json()
+    assert order1["sequence_id"] == 1
+
+    # 2. 失敗請求（重複搶同一座位）-> 409，events.last_seq 必須維持 1
+    res_fail = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={"Authorization": f"Bearer {user_token}"},
+        json={"seat_ids": [seats[0].id]},
+    )
+    assert res_fail.status_code == 409
+
+    # 3. 模擬已遞增 events.last_seq 後、db.commit() 前發生例外 -> 必須整筆回滾，不消耗序號
+    async def _boom_before_commit() -> None:
+        raise RuntimeError("Simulated crash right before commit")
+
+    with pytest.raises(RuntimeError, match="Simulated crash right before commit"):
+        async with TestSessionLocal() as fail_sess:
+            await reserve_specific_seats(
+                fail_sess,
+                event.id,
+                buyer,
+                [seats[1].id],
+                on_before_commit=_boom_before_commit,
+            )
+
+    await db_session.refresh(event)
+    assert event.last_seq == 1
+    await db_session.refresh(seats[1])
+    assert seats[1].status == SeatStatus.AVAILABLE.value
+
+    # 4. 第 2 筆自動配位成功 -> sequence_id 必須嚴格接續為 2（無跳號）
+    res2 = client.post(
+        f"/api/v1/events/{event.id}/tickets/allocate",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "X-Request-ID": "trace-c11-seq-002",
+        },
+        json={"zone_code": "A", "quantity": 2},
+    )
+    assert res2.status_code == 201, res2.text
+    order2 = res2.json()
+    assert order2["sequence_id"] == 2
+
+    await db_session.refresh(event)
+    assert event.last_seq == 2
+
+    outbox_rows = list(
+        (
+            await db_session.execute(
+                select(EventOutbox)
+                .where(EventOutbox.event_id == event.id)
+                .order_by(EventOutbox.sequence_id.asc())
+            )
+        )
+        .scalars()
+        .all()
+    )
+    assert [row.sequence_id for row in outbox_rows] == [1, 2]
+    assert all(row.event_type == "seat_held" for row in outbox_rows)
+    assert all(row.status == OutboxStatus.PENDING.value for row in outbox_rows)
+    assert outbox_rows[0].payload["request_id"] == "trace-c11-seq-001"
+    assert outbox_rows[0].payload["order_id"] == order1["id"]
+    assert outbox_rows[1].payload["request_id"] == "trace-c11-seq-002"
+    assert outbox_rows[1].payload["order_id"] == order2["id"]
+    assert len(outbox_rows[1].payload["seats"]) == 2
+
+
+@pytest.mark.asyncio
+async def test_idempotency_key_completed_200_processing_409_mismatch_422_and_db_fallback(
+    client, db_session
+):
+    """
+    ★ 關鍵 Commit 11 冪等性驗證：
+    1. 首次成功回傳 201 Created；相同 Key + 相同 Payload 重送回傳 200 OK 快取（不重複建單、不遞增序號）。
+    2. 相同 Key + 不同 Payload 或不同使用者 -> 回傳 422 Unprocessable Entity。
+    3. Redis 快取失效／遭清除時，改由資料庫 Order.idempotency_key 兜底（相同參數 200、不同參數 422）。
+    4. 相同 Key 正在處理中 -> 並發重送立即回傳 409 Conflict；待首次完成後再重送則回傳 200 OK。
+    5. 交易失敗時釋放 processing 鎖，不造成永久 409 卡死。
+    """
+    seed_users()
+    user_token = _login_seed(client, "user")
+    admin_token = _login_seed(client, "admin")
+    admin_user = (
+        await db_session.execute(select(User).where(User.email == "admin@flashticket.com"))
+    ).scalar_one()
+    buyer = (
+        await db_session.execute(select(User).where(User.email == "user@flashticket.com"))
+    ).scalar_one()
+
+    event, seats = await _create_published_event_with_seats(
+        db_session,
+        admin_user.id,
+        title="Idempotency Test Event",
+        zones_spec=[("A", "A 區", Decimal("1000.00"), 8)],
+    )
+    await _reset_metrics_everywhere([event.id])
+
+    redis = get_redis()
+    keys_to_clean = [
+        "idempotency:tickets:idem-reserve-001",
+        "idempotency:tickets:idem-processing-001",
+        "idempotency:tickets:idem-failed-001",
+    ]
+    await redis.delete(*keys_to_clean)
+
+    # 1. 首次指定選位 -> 201 Created
+    res_create = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-reserve-001",
+        },
+        json={"seat_ids": [seats[0].id]},
+    )
+    assert res_create.status_code == 201, res_create.text
+    created_body = res_create.json()
+    assert created_body["idempotency_key"] == "idem-reserve-001"
+    assert created_body["sequence_id"] == 1
+
+    # 2. 相同 Key + 相同 Payload 重送 -> 200 OK（Redis 快取命中，不重複扣庫存／不遞增序號）
+    res_replay = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-reserve-001",
+        },
+        json={"seat_ids": [seats[0].id]},
+    )
+    assert res_replay.status_code == 200, res_replay.text
+    assert res_replay.json()["id"] == created_body["id"]
+    assert res_replay.json()["sequence_id"] == 1
+
+    await db_session.refresh(event)
+    assert event.last_seq == 1
+
+    # 3. 相同 Key + 不同 Payload -> 422
+    res_mismatch = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-reserve-001",
+        },
+        json={"seat_ids": [seats[1].id]},
+    )
+    assert res_mismatch.status_code == 422
+
+    # 4. 相同 Key + 不同使用者 -> 422（不可洩漏原使用者訂單）
+    res_other_user = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {admin_token}",
+            "Idempotency-Key": "idem-reserve-001",
+        },
+        json={"seat_ids": [seats[0].id]},
+    )
+    assert res_other_user.status_code == 422
+
+    # 5. 清空 Redis 冪等快取 -> DB 持久層兜底仍回傳 200（相同參數）與 422（不同參數）
+    await redis.delete("idempotency:tickets:idem-reserve-001")
+    res_db_replay = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-reserve-001",
+        },
+        json={"seat_ids": [seats[0].id]},
+    )
+    assert res_db_replay.status_code == 200, res_db_replay.text
+    assert res_db_replay.json()["id"] == created_body["id"]
+
+    await redis.delete("idempotency:tickets:idem-reserve-001")
+    res_db_mismatch = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-reserve-001",
+        },
+        json={"seat_ids": [seats[1].id]},
+    )
+    assert res_db_mismatch.status_code == 422
+
+    # 6. 處理中 (in-progress) 相同 Key 並發重送 -> 409 Conflict；完成後再重送 -> 200 OK
+    in_progress_status: list[int] = []
+
+    async def _trigger_concurrent_duplicate() -> None:
+        dup_res = client.post(
+            f"/api/v1/events/{event.id}/tickets/allocate",
+            headers={
+                "Authorization": f"Bearer {user_token}",
+                "Idempotency-Key": "idem-processing-001",
+            },
+            json={"zone_code": "A", "quantity": 1},
+        )
+        in_progress_status.append(dup_res.status_code)
+
+    async with TestSessionLocal() as alloc_sess:
+        alloc_order = await allocate_zone_seats(
+            alloc_sess,
+            event.id,
+            buyer,
+            "A",
+            1,
+            idempotency_key="idem-processing-001",
+            on_before_commit=_trigger_concurrent_duplicate,
+        )
+
+    assert in_progress_status == [409]
+    assert alloc_order.sequence_id == 2
+
+    # 首次處理完成後，相同 Key 重送回傳 200 OK 與同一筆訂單
+    res_after_done = client.post(
+        f"/api/v1/events/{event.id}/tickets/allocate",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-processing-001",
+        },
+        json={"zone_code": "A", "quantity": 1},
+    )
+    assert res_after_done.status_code == 200, res_after_done.text
+    assert res_after_done.json()["id"] == alloc_order.id
+
+    # 7. 失敗請求必須釋放 processing 鎖，後續可重試成功
+    res_fail_idem = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-failed-001",
+        },
+        json={"seat_ids": [seats[0].id]},  # 已被鎖 -> 409 conflict
+    )
+    assert res_fail_idem.status_code == 409
+
+    res_retry_after_fail = client.post(
+        f"/api/v1/events/{event.id}/tickets/reserve",
+        headers={
+            "Authorization": f"Bearer {user_token}",
+            "Idempotency-Key": "idem-failed-001",
+        },
+        json={"seat_ids": [seats[5].id]},  # 改選空位 -> 不應卡在 processing 409，應成功 201
+    )
+    assert res_retry_after_fail.status_code == 201, res_retry_after_fail.text
+    assert res_retry_after_fail.json()["sequence_id"] == 3
+
+    await redis.delete(*keys_to_clean)

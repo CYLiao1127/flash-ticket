@@ -2,7 +2,7 @@
 
 from datetime import datetime
 from decimal import Decimal
-from typing import List
+from typing import List, Optional
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
@@ -64,12 +64,15 @@ class OrderReservationResponse(BaseModel):
     event_id: int
     user_id: int
     status: str
+    idempotency_key: Optional[str] = None
+    sequence_id: Optional[int] = None
     total_ticket_amount: Decimal
     service_fee: Decimal
     total_amount: Decimal
     expires_at: datetime
     created_at: datetime
     items: List[OrderItemDetailResponse]
+    is_idempotent_replay: bool = Field(default=False, exclude=True)
 
 
 class TicketMetricsResponse(BaseModel):
