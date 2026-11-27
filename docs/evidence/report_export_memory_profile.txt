@@ -1,4 +1,4 @@
-# Commit 23: Streaming Excel Export Memory Profile (500,000 Rows under 512 MiB RAM)
+# Streaming Excel Export Memory Profile (500,000 Rows under 512 MiB RAM)
 
 Container Memory Limit (Kernel cgroup v2 verified on api-1):
   docker-compose.yml: deploy.resources.limits.memory = 512M

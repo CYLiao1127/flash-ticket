@@ -1,6 +1,6 @@
 # Flash Ticket: 高併發活動搶票與即時監控平台
 
-Flash Ticket 提供活動建立、選位購票與即時座位更新，也有供管理人員查看系統狀況的後台。
+Flash Ticket 是一套針對熱門開賣高併發場景設計的活動搶票與即時監控平台。後端以 PostgreSQL 作為訂單與座位狀態的唯一真實來源（搭配條件原子更新、`FOR UPDATE SKIP LOCKED`、`pg_advisory_xact_lock` 與部分唯一索引防止超賣），並透過 Transactional Outbox、Redis Pub/Sub 與 WebSocket/SSE 將座位異動與系統告警即時推播至前後台，同時支援在 512 MiB 記憶體限制內串流匯出 50 萬筆 Excel 銷售報表。
 
 ---
 
@@ -52,15 +52,15 @@ flash-ticket/
 
 ## 啟動方式
 
-### 設定環境變數
+### 1. Docker 部署（一鍵啟動全部服務）
 
-先複製環境變數範本：
+可選步驟（若不複製，Docker Compose 會直接使用內建預設值）：
 
 ```bash
 cp .env.example .env
 ```
 
-### 啟動服務
+一鍵建置並啟動全部服務（自動完成 PostgreSQL Migration 與三組預設測試帳號建立）：
 
 ```bash
 docker compose up -d --build
@@ -74,7 +74,34 @@ docker compose up -d --build
 - **ReDoc API 文件**：`http://localhost:8000/redoc`
 - **健康檢查端點**：`http://localhost:8000/health`
 
-### 執行測試與壓測
+### 2. 本地運行步驟（基礎設施用 Docker，應用程式於本機執行）
+
+若想在本機 Python 環境直接執行 FastAPI 與背景 Worker 進行開發除錯（需 Python 3.12）：
+
+```bash
+# 1. 僅啟動 PostgreSQL 與 Redis
+docker compose up -d postgres redis
+
+# 2. 建立虛擬環境並安裝依賴
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+
+# 3. 設定本機連線環境變數
+export DATABASE_URL=postgresql+asyncpg://flash_user:flash_password@localhost:5432/flash_ticket
+export SYNC_DATABASE_URL=postgresql://flash_user:flash_password@localhost:5432/flash_ticket
+export REDIS_URL=redis://localhost:6379/0
+
+# 4. 執行資料庫遷移與預設帳號初始化
+alembic upgrade head && python -m app.auth.seed
+
+# 5. 啟動 API（終端機 1）與背景 Worker（終端機 2）
+uvicorn app.main:app --host 0.0.0.0 --port 8000
+python -m app.workers.runner
+```
+
+*(註：直接啟動 Uvicorn 時可由 `http://localhost:8000/docs` 存取 API；若需透過 Nginx 託管靜態前端與邊緣限流，請使用上方 Docker Compose 啟動。)*
+
+### 3. 執行測試與壓測
 
 ```bash
 # 執行全套自動化測試
@@ -106,11 +133,32 @@ make verify-consistency
 
 ## 預設測試帳號
 
-首次啟動時會建立以下測試帳號：
+首次啟動時會自動建立以下測試帳號（**正式環境必須更換預設帳號密碼、`SECRET_KEY` 與 `PAYMENT_WEBHOOK_SECRET`**）：
 
 - **Admin**：`admin@flashticket.com` / `AdminPass123!`
 - **User**：`user@flashticket.com` / `UserPass123!`
 - **Viewer**：`viewer@flashticket.com` / `ViewerPass123!`
+
+---
+
+## 核心 API 與即時協定摘要
+
+完整 REST 規格見 Swagger（`http://localhost:8000/docs`）與 ReDoc（`http://localhost:8000/redoc`）。以下補充主要端點、錯誤慣例及 OpenAPI 未涵蓋的 WebSocket / SSE 協定：
+
+| 模組 | 主要端點 | 權限 | 說明 |
+| :--- | :--- | :--- | :--- |
+| 認證 | `POST /api/v1/auth/{register,login,logout}`、`GET /api/v1/auth/me` | 公開 / 已登入 | JWT 內嵌 `token_version`，登出／停用／改角色即刻作廢 |
+| 活動與座位 | `GET/POST /api/v1/events`、`PATCH/DELETE /api/v1/events/{id}`、`POST .../publish`、`GET .../seats`、`POST .../seats/import` | 公開或依角色 | Keyset 分頁、樂觀鎖 `version`、CSV/JSON 批量匯入 |
+| 訂票與金流 | `POST /api/v1/events/{id}/tickets/{reserve,allocate}`、`GET /api/v1/orders`、`GET /api/v1/orders/{id}`、`POST /api/v1/orders/{id}/cancel`、`POST /api/v1/payments/mock/pay`、`POST /api/v1/payments/webhook` | User / Admin / 簽章 | 支援 `Idempotency-Key` 標頭；Webhook 採 HMAC-SHA256 + 5 分鐘防重放 |
+| 監控與管理 | `GET /api/v1/admin/monitoring/{metrics,access-logs,alerts,trace/{request_id}}`、`GET/PATCH /api/v1/admin/users` | Admin / Viewer | 僅 Admin 可修改使用者角色與啟用狀態 |
+| 串流報表 | `GET /api/v1/reports/exports?event_id=&date_from=&date_to=&batch_size=1000` | 全角色（依範圍） | User 僅限自己活動；Admin/Viewer 可看全部；回傳 `X-Report-Rows` |
+
+- **統一錯誤格式與冪等慣例**：錯誤回應採 FastAPI 標準 `{"detail": "<message>"}`（`401` 未認證／憑證失效、`403` 越權、`409` 座位衝突／樂觀鎖衝突／冪等處理中、`422` 參數或冪等指紋不符、`429` Nginx 邊緣限流）。訂票端點攜帶 `Idempotency-Key` 重送時：已完成回 `200` 原訂單、處理中回 `409`、同 Key 但參數不同回 `422`。
+- **WebSocket 即時座位推播（`WS /ws/events/{event_id}?token=<jwt>&last_seq=<n>`）**：
+  - 握手通過後伺服器先發送 `{"type": "connected", "event_id": ..., "last_seq": ...}`。
+  - 若提供 `last_seq` 且落後 `<= 48` 筆，依序補發遺漏事件；落後超過 48 筆則發送 `{"type": "resync_required", ...}` 通知前端重拉 `/seats` 快照。
+  - 座位狀態變動事件格式為 `{"type": "seat_update", "event_type": "seat_held|seat_sold|seat_released", "sequence_id": <int>, "seat_ids": [...]}`；支援文字幀 `ping` ↔ `pong` 心跳，慢客戶端佇列滿（64 筆）時主動以 Close Code `1008` 關閉。
+- **SSE 串流端點**：`GET /api/v1/events/{id}/imports/{job_id}/stream?token=<jwt>`（座位匯入即時進度）與 `GET /api/v1/admin/monitoring/alerts/stream?token=<jwt>`（Admin 告警串流），握手時先送 `event: connected`，後續推送 `event: progress` / `event: alert`（經 Nginx `proxy_buffering off` 即時送達）。
 
 ---
 
@@ -120,10 +168,10 @@ make verify-consistency
 - **資料庫設計與 Schema 規範**：[docs/DATABASE.md](docs/DATABASE.md)（ERD、欄位說明、索引與狀態機）
 - **AI 輔助開發日誌與除錯覆盤**：[AI_USAGE.md](AI_USAGE.md)（AI 輔助範圍及 6 個問題修正案例）
 - **Token 即時作廢與認證相依層效能基準量測 (Q5.1)**：[docs/evidence/q5_token_benchmark.txt](docs/evidence/q5_token_benchmark.txt)（比較 JWT 驗證、Redis 檢查與資料庫查詢的延遲）
-- **大量座位匯入與經 Nginx 無緩衝 SSE 實測紀錄**：[docs/evidence/c08_seat_import_and_sse.txt](docs/evidence/c08_seat_import_and_sse.txt)（100,000 列 PostgreSQL `COPY` 耗時與經 Nginx 逐幀即時送達實測）
-- **雙重防超賣破壞性實驗與超賣復現存證 (Q1.3)**：[docs/evidence/q1_deliberate_failure.log](docs/evidence/q1_deliberate_failure.log)（實驗 A 拔除部分唯一索引仍擋住 30 併發；實驗 B 拔除條件更新重現 30× 超賣後於 Commit 14 還原）
+- **大量座位匯入與經 Nginx 無緩衝 SSE 實測紀錄**：[docs/evidence/seat_import_and_sse.txt](docs/evidence/seat_import_and_sse.txt)（100,000 列 PostgreSQL `COPY` 耗時與經 Nginx 逐幀即時送達實測）
+- **雙重防超賣破壞性實驗與超賣復現存證 (Q1.3)**：[docs/evidence/q1_deliberate_failure.log](docs/evidence/q1_deliberate_failure.log)（實驗 A 拔除部分唯一索引仍擋住 30 併發；實驗 B 拔除條件更新重現 30× 超賣，分別對應 `4c7af9b` 與還原提交 `906a3b7`）
 - **高併發壓力測試與一致性驗證報告**：[LOADTEST.md](LOADTEST.md)（情境 A/B 數據、WebSocket 連線池問題及資料一致性檢查）
-- **512 MiB 容器 50 萬筆串流 Excel 匯出實測紀錄**：[docs/evidence/q9_memory_profile.txt](docs/evidence/q9_memory_profile.txt)（端對端 HTTP 500,000 列實測 `cgroup anon` 峰值 `95.68 MiB`、`oom_kill = 0`）
+- **512 MiB 容器 50 萬筆串流 Excel 匯出實測紀錄**：[docs/evidence/report_export_memory_profile.txt](docs/evidence/report_export_memory_profile.txt)（端對端 HTTP 500,000 列實測 `cgroup anon` 峰值 `95.68 MiB`、`oom_kill = 0`）
 
 ```mermaid
 flowchart LR
@@ -162,10 +210,10 @@ flowchart LR
 - [x] 使用者註冊、登入、登出
 - [x] 登出、停用與角色變更時憑證立即作廢（Token Version 機制）
 - [x] 管理員使用者管理 API（停用／啟用帳號與修改角色即時作廢憑證）
-- [x] Token 失效效能量測與基準測試報告 (Commit 05 / Q5.1)
+- [x] Token 失效效能量測與基準測試報告 (`d8c9926` / Q5.1)
 - [x] RBAC 三角色權限控管（Admin、User、Viewer）
 - [x] 系統自動建立種子帳號（Admin / User / Viewer）
-- [x] 授權矩陣自動化驗證測試 (Commit 06 / Q5.3)
+- [x] 授權矩陣自動化驗證測試 (`ec2d927` / Q5.3)
 
 ### 活動與座位管理
 
@@ -179,7 +227,7 @@ flowchart LR
 - [x] 匯入模式支援（`all_or_nothing` 與 `skip_invalid`）
 - [x] 重複檔案 SHA-256 去重（回傳既有 Job）
 - [x] 匯入進度即時查詢與 SSE 進度推播、遺留任務恢復及錯誤列報告（`/imports/{job_id}`、`/stream`，含原列號與錯誤原因）
-- [x] 建立者帳號停用時自動取消待執行與進行中之匯入任務並回滾未提交批次（Commit 09 / Q5.2）
+- [x] 建立者帳號停用時自動取消待執行與進行中之匯入任務並回滾未提交批次（`30e17f4` / Q5.2）
 - [x] 即時座位狀態推播（Leader-Elected Outbox Relay + WebSocket 跨副本廣播 + 斷線補償與慢客戶端保護，Q4）
 
 ### 搶票與交易
@@ -207,7 +255,7 @@ flowchart LR
 ### 報表匯出
 
 - [x] 活動銷售 Excel 報表匯出（`GET /api/v1/reports/exports`，含 `Summary` 摘要／區域彙總與 `Details` 訂單明細）
-- [x] 50 萬筆訂單於 512MB 記憶體上限內串流匯出（磁碟備援 `xlsxwriter(constant_memory=True)` + PostgreSQL Server-Side Cursor，實測見 [`docs/evidence/q9_memory_profile.txt`](docs/evidence/q9_memory_profile.txt)）
+- [x] 50 萬筆訂單於 512MB 記憶體上限內串流匯出（磁碟備援 `xlsxwriter(constant_memory=True)` + PostgreSQL Server-Side Cursor，實測見 [`docs/evidence/report_export_memory_profile.txt`](docs/evidence/report_export_memory_profile.txt)）
 - [x] 指定時區顯示（`Asia/Taipei`）與金額 Excel 數值型別
 - [x] 匯出權限校驗（User 僅限自己活動、Viewer/Admin 可看全部）
 
@@ -219,20 +267,19 @@ flowchart LR
 ### 測試與壓力測試
 
 - [x] 自動化測試：Docker Compose 全套 `make test` 單次實測 `83 passed, 0 failed`（2026-11-28；含新增的 Redis 舊版本快取回歸測試）。另有 2 個相依套件棄用警告。
-- [x] 刻意破壞鎖機制的超賣復現存證（Q1 驗證，Commit 13 `4c7af9b` → Commit 14 `906a3b7` 還原）
-- [x] 情境 A：3,000 VU、10,000 座位、持續負載 60 秒。此輪 5xx／逾時率為 `0.02%`（2 / 11,010；k6 顯示 `0.01%`），p50 / p95 / p99 為 `412.32 / 5,349.21 / 8,081.69 ms`，建立 2,217 筆訂單；六項一致性檢查均通過（詳見 [`LOADTEST.md`](LOADTEST.md)）。
+- [x] 刻意破壞鎖機制的超賣復現存證（Q1 驗證，`4c7af9b` 破鎖復現 → `906a3b7` 還原）
+- [x] 情境 A：3,000 VU、10,000 座位、持續負載 60 秒。Nginx 邊緣限流（`35r/s burst=15`）將約 72%（`8,444 / 11,708`）超載請求回 `429` 卸載，因此 60 秒內建立 2,217 筆訂單（3,782 席），5xx／逾時率為 `0.02%`（2 / 11,010；k6 顯示 `0.01%`），p50 / p95 / p99 為 `412.32 / 5,349.21 / 8,081.69 ms`；六項一致性檢查均通過（詳見 [`LOADTEST.md`](LOADTEST.md)）。
 - [x] 情境 B 壓測（2,000 條即時 WebSocket 連線訂閱：於 `worker_connections 8192` 最終設定實測 **`100.00%` 連線成功率（`2,330 / 2,330`，Exit Code `0`、`ws_connecting` p50 `221.45ms` / p95 `3.15s` / p99 `5.81s`）**，伺服器端同時在線峰值 `2,002`，見 [`LOADTEST.md`](LOADTEST.md)）
-- [x] 壓測後數據一致性校驗腳本（[`scripts/verify_consistency.py`](scripts/verify_consistency.py)，六大不變量全數通過）
+- [x] 壓測後數據一致性校驗腳本（[`scripts/verify_consistency.py`](scripts/verify_consistency.py)，六項不變量全數通過）
 
 ---
 
 ## 已知限制與取捨
 
-1. **單機 Docker 壓測環境之邊緣限流取捨**：在單機 8 vCPU 同時執行 k6（3,000 VU）+ Nginx + 雙 API + PostgreSQL + Redis 時，Nginx 透過 `limit_req`（`35r/s burst=15`）於邊緣以 `429 Too Many Requests` 快速回絕超出資料庫承受上限的瞬間寫入洪峰，這次測試的 5xx／逾時率為 `0.02%`（2 / 11,010），六項資料一致性檢查均通過。這組限流值是單機測試環境的設定；正式環境需要依部署規模重新量測。
+1. **單機 Docker 壓測環境之邊緣限流取捨**：在單機 8 vCPU 同時執行 k6（3,000 VU）+ Nginx + 雙 API + PostgreSQL + Redis 時，Nginx 透過 `limit_req`（`35r/s burst=15`）於邊緣以 `429 Too Many Requests` 快速回絕超出資料庫承受上限的瞬間寫入洪峰（約 72% 請求回 `429`），使這輪測試的 5xx／逾時率維持在 `0.02%`（2 / 11,010），六項資料一致性檢查均通過。這組限流值是單機測試環境的設定；正式環境需要依部署規模重新量測。
 2. **50 萬筆串流 Excel 匯出之暫存磁碟需求**：因 XlsxWriter 須以磁碟暫存檔取代 `BytesIO` 才能真正啟用 `constant_memory=True`，單次匯出 50 萬筆明細期間容器 `/tmp` 需約 150–250 MB 可用磁碟空間，檔案串流完畢或連線中斷後會於 `finally` 區塊自動刪除。
 3. **本機前端驗證方式**：前台與後台使用原生 HTML/JavaScript，由 Nginx 託管。若頁面和狀態管理之後變複雜，再考慮採用 SPA 框架。
 4. **WebSocket 握手憑證的代理日誌風險**：瀏覽器握手將 JWT 放在 `?token=` 查詢參數；正式部署時應確認 Nginx 與外層代理不會記錄完整查詢字串，必要時加入遮罩。
 5. **Outbox 保留策略尚未設定**：已發布事件目前不會定期清除，長期運作會持續增加 PostgreSQL 儲存量；清理前需先定義事件補發所需的保留範圍。
 6. **存取日誌佇列不是耐久佇列**：Worker 會先從 Redis 移除一批日誌，再提交至 PostgreSQL；若程序剛好在兩步之間終止，該批日誌可能遺失。資料庫長時間不可用時，Redis 佇列也可能持續增長。
 7. **未落庫監控指標有 24 小時恢復窗口**：Redis 秒桶 TTL 為 24 小時；Worker 或資料庫中斷超過此時間，或 Redis 資料遺失時，尚未寫入 PostgreSQL 的指標可能過期。
-8. **WebSocket 密集重連的 p99 測試尚未以目前 Nginx 設定重跑**：`LOADTEST.md` 中該輪使用 `worker_connections=4096`，目前設定為 `8192`；59.87% 成功率不代表目前設定的結果。

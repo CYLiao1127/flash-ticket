@@ -69,4 +69,4 @@ Conclusion (Experiment B):
   All 30 concurrent buyers read status='available' before any transaction committed,
   then overwrote seats(id=1) and inserted 30 active order_items for the exact same seat_id=1.
   The concurrency test suite immediately caught the 30x overselling (assert 30 == 1).
-  All protections are restored in the immediately following Commit 14.
+  All protections are restored in the immediately following revert commit (906a3b7).

@@ -47,7 +47,7 @@ make loadtest-b
 | :--- | :--- |
 | 總請求數 (`http_reqs`) | **11,824 次** |
 | 平均吞吐量 (RPS) | **262.03 req/s** |
-| 伺服器 5xx / 逾時錯誤率 (`booking_server_5xx`) | **0.00%**（11,824 次中僅 1 次逾時，遠低於 5% 門檻） |
+| 伺服器 5xx / 逾時錯誤率 (`booking_server_5xx`) | **0.01%**（`1 / 11,824 = 0.0085%`，1 次逾時納入錯誤率計算，k6 原始截斷顯示 `0.00%`，遠低於 5% 門檻） |
 | 延遲分布 (`booking_latency_ms`) | min `5.58ms` / p50 **`371.03ms`** / p90 `2,137.23ms` / p95 `3,340.55ms` |
 | 成功建立訂單 (`201`) | 547 筆（其餘為預期 `409` 限購 4 張／區域售罄與 `200` 冪等重播） |
 
@@ -68,6 +68,7 @@ make loadtest-b
 | 延遲 `p50` (`booking_latency_ms` / `http_req_duration`) | 14,581 ms | **`412.32 ms`** / `435.92 ms` |
 | 延遲 `p95` (`booking_latency_ms` / `http_req_duration`) | — | **`5,349.21 ms`** / `5,630.00 ms` |
 | 延遲 `p99` (`booking_latency_ms` / `http_req_duration`) | — | **`8,081.69 ms`** / `9,170.00 ms` |
+| 成功建立訂單 (`201`) 延遲 (`expected_response:true`) | — | **p50 `1,120 ms` / p95 `6,680 ms` / p99 `9,840 ms`**（僅含真正進入 DB 寫入之 201 請求） |
 | 壓測後六大一致性校驗 | PASS | **PASS**（3,782 席，0 重複，Outbox `1..2577`） |
 | 雙 API 副本記憶體 | `217.4 MiB` / `209.9 MiB` | **`< 220 MiB` / 512 MiB（零 OOM）** |
 
@@ -94,11 +95,13 @@ make loadtest-b
     booking_server_5xx.............: 0.01%  2 out of 11010
     booking_success................: 2217   27.389209/s
     http_req_duration..............: avg=1.22s       min=59.04µs  med=435.92ms   max=15.94s       p(90)=4.02s       p(95)=5.63s       p(99)=9.17s
+      { expected_response:true }...: avg=1.92s       min=21.21ms  med=1.12s      max=12.38s       p(90)=5.01s       p(95)=6.68s       p(99)=9.84s
     http_reqs......................: 11708  144.642699/s
     running (1m20.9s), 0000/3000 VUs, 9479 complete and 2791 interrupted iterations
 ```
 
 - **執行時間**：三階段設定為 `10s + 60s + 5s = 75s (1m15s)`，加上 `gracefulRampDown: 5s` 與結束收尾共 `80.94s (1m20.9s)`，故 `11,708 / 80.94s = 144.64 req/s`。
+- **同機壓測端排程延遲說明**：整體延遲（`http_req_duration` p50 `435.92 ms`）包含約 72% 由 Nginx 直接回傳的 `429`（單純 Nginx 拒絕本應 `< 1 ms`），p50 仍達數百毫秒，顯示壓測端（k6）在 3,000 VU 時亦受同機 8 vCPU 資源競爭與排程延遲影響；因此成功訂單（`201`，`expected_response:true`）的延遲較能反映後端交易行為，但在同機環境下同樣可能偏高。
 - **錯誤率計算**：`2 / 11,010 = 0.018165%`，k6 內建 `Rate` 採無條件捨去顯示 `0.01%`，標準四捨五入為 `0.02%`（兩者皆遠低於 `< 5%` 門檻）。
 - **`checks_total` 與中斷迭代**：壓測結束觸發 `gracefulStop` 時有 `2,791` 個進行中 VU 遭 Goja 執行期中斷，導致各指標沿 `scenario_a_booking.js` 程式碼執行順序單調遞減：
   1. Line 61 `http.post(...)` 完成送出：`http_reqs = 11,708`
@@ -132,10 +135,11 @@ RESULT: PASS (All 6 consistency invariants verified)
 
 六項一致性檢查結果：
 1. **零超賣**：`duplicate_active_seats = 0`（雙層保護：條件原子更新 + `uq_active_seat_order` 部分唯一索引）
-2. **座位與訂單明細嚴格一致**：`seats.held (3782) == order_items.held (3782)`、`seats.sold (0) == order_items.sold (0)`
-3. **單人限購 4 張**：`Per-User Max Active Tickets = 4 <= 4`（`pg_advisory_xact_lock` 原子序列化）
-4. **5% 服務費精確四捨五入**：`Invalid Service Fee Orders = 0`
-5. **Outbox 活動序號嚴格連號**：`last_seq = 2577 == count = 2577`，範圍 `1..2577` 零跳號
+2. **鎖定中座位與訂單明細一致**：`seats.held (3782) == order_items.held (3782)`
+3. **已售出座位與訂單明細一致**：`seats.sold (0) == order_items.sold (0)`
+4. **單人限購 4 張**：`Per-User Max Active Tickets = 4 <= 4`（`pg_advisory_xact_lock` 原子序列化）
+5. **5% 服務費精確四捨五入**：`Invalid Service Fee Orders = 0`
+6. **Outbox 活動序號嚴格連號**：`last_seq = 2577 == count = 2577`，範圍 `1..2577` 零跳號
 
 ### 4. 多元壓測補充：極端稀缺完售競爭（500 VU 搶 200 座位，`event_id=51`）
 
@@ -159,7 +163,7 @@ RESULT: PASS (All 6 consistency invariants verified)
 
 ### 調整前後的測試結果（2,000 VU / 30 秒）
 
-表格中的含 `p99` 重測版是在 Nginx `worker_connections=4096` 時執行；目前 [`nginx.conf`](nginx.conf) 設為 `8192`，所以該欄的 59.87% 連線成功率不能代表目前配置。要比較最終配置，需在 8192 下重跑這個連續重連情境。
+*(註：`ws_connect_success_rate` 分母 `2,330` 統計完整跑完 15 秒連線視窗的 iterations；`ws_connected_total = 3,948` 另包含於 `gracefulStop` 階段中斷但已完成 `101` 升級並收到 `connected` 握手幀的 `1,618` 條連線。)*
 
 | 指標 | 修復前 (`Depends(get_db)`) | 修復後 (`4096` 單輪抽樣版) | 最終設定通過版 (`worker_connections 8192` + `p99`) |
 | :--- | :--- | :--- | :--- |
@@ -187,7 +191,7 @@ t=0s..18s: 14 -> 216 -> 640 -> 835 -> 1045 -> 1236 -> 1440 -> 1631 -> 1832 -> 19
 
 1. **熱點鎖瓶頸：`events.last_seq` 單列序列化鎖（Q4.1）**
    - 為了滿足「單一活動嚴格無跳號單調序號」，每筆搶票交易在提交前都會執行 `UPDATE events SET last_seq = last_seq + 1 WHERE id = :event_id RETURNING last_seq`。
-   - 雖然已刻意將此步驟放在鎖順序的**最後一步**以將鎖持有時間壓縮到 sub-millisecond，但在超高併發寫入同一活動時，所有成功的搶票交易仍會在該 `events` 列排隊提交，是情境 A 寫入延遲（p50 約 371ms、p95 約 3.34s）的限制之一。
+   - 雖然已刻意將此步驟放在鎖順序的**最後一步**以將鎖持有時間壓縮到 sub-millisecond，但在超高併發寫入同一活動時，所有成功的搶票交易仍會在該 `events` 列排隊提交，推測為情境 A 寫入延遲（300 VU p50 約 371ms、3,000 VU 成功 201 訂單 p50 約 1.12s）的主要瓶頸之一。
    - 若不要求活動序號連續且無空洞，可評估 PostgreSQL `SEQUENCE` 或依 `(event_id, zone_code)` 分區序號，減少所有訂單更新同一 `events` 列造成的等待。
 2. **PostgreSQL 連線池與 FastAPI 單行程上限**
    - 目前雙副本各為單一 `uvicorn` worker + 30 條 DB 連線（合計 60 條），面對 3,000 VU 瞬間尖峰時，請求會在連線池排隊；正式上線建議於 PostgreSQL 前方掛載 **PgBouncer (Transaction Pooling)** 並依 CPU 核心數水平擴展 API 副本數。

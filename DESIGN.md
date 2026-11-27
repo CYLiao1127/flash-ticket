@@ -1,6 +1,6 @@
 # Flash-Ticket 系統架構與設計問答 (DESIGN.md)
 
-本文件對應評測規範第二節（系統架構圖）、第八節（Q1–Q6 設計問答）以及階段九（512 MiB 串流報表匯出），所有設計結論皆附帶對應程式碼檔案行號、GitHub Commit 永久連結與實測驗證數據。
+本文件對應評測規範第二節（系統架構圖）、第八節（Q1–Q6 設計問答）以及串流報表匯出設計，所有設計結論皆附帶對應程式碼檔案行號、GitHub Commit 永久連結與實測驗證數據。
 
 ---
 
@@ -129,8 +129,11 @@ flowchart TD
 | 4 | **遲到付款退款記錄 vs. 模擬退款處理** | PostgreSQL 已記錄 `refund_requested` 與 Outbox 事件 | Worker 尚未處理退款事件並更新模擬退款狀態 |
 | 5 | **存取日誌從 Redis 佇列寫入 DB** | Worker 先讀取佇列項目 | `flush_access_logs_batch` 在 DB commit 前執行 `LTRIM`；若程序於 trim 後、commit 前被終止，該批日誌可能遺失 |
 
-### 2.2 API 在寫回冪等快取前中止時的恢復方式
+### 2.2 最危險時間窗選擇與 `kill -9` 恢復方式
 
+- **為何選擇時間窗 #2（而非 #5）作為最危險的核心時間窗**：
+  - 時間窗 #5（存取日誌 `LTRIM` 後、DB commit 前崩潰）確實會造成該批日誌永久遺失且目前無法自動收斂（需改用 Redis Streams / `LMOVE` 才能達成 at-least-once），但它屬於可觀測性資料，不影響交易帳務與座位正確性。
+  - 時間窗 #2 直接位於**核心搶票寫入路徑**上：訂單已在資料庫扣位成立，但客戶端沒收到回應且 Redis 仍殘留 `PROCESSING` 鎖；若缺乏資料庫層的 `idempotency_key` 回源與指紋核對，使用者重試可能導致重複扣位或長期卡在 409，因此對核心業務正確性風險最高。
 - **情境（時間窗 #2）**：API 提交訂單後、回填 Redis 冪等結果前被 `kill -9`，客戶端未收到回應而以相同 `Idempotency-Key` 重送。
 - **收斂流程**（[`app/tickets/service.py:218-262`](https://github.com/CYLiao1127/flash-ticket/blob/52be8a21183da184dd5b74214ce597d8e80f6593/app/tickets/service.py#L218-L262) 與 `tests/test_recovery.py::test_kill_9_mid_transaction_recovery_and_state_convergence_q22`）：
   1. 在 Redis `PROCESSING` 鎖 TTL（預設 `30s`）過期前，重送請求收到 `409 Conflict`（告知前次請求處理中，請稍後重試）。
@@ -192,6 +195,7 @@ flowchart TD
   ```
   並搭配複合部分索引 `ix_seats_allocation`（`app/models.py:338`）。
 - **為何不在應用記憶體挑選**：若先 `SELECT` 可用座位至 Python 再挑前 N 個去 `UPDATE`，在高併發搶購同一區域時，數百個請求會同時挑中**相同的頭幾個座位**，可能增加鎖競爭，並讓請求因同時挑到相同座位而收到 `409 Conflict`，即使該區仍有其他空位。`FOR UPDATE SKIP LOCKED` 讓每個併發交易自動跳過已被鎖定的列，直接拿到下一批空位。
+- **取捨**：當區內剩餘空位不多且剛好有其他交易正在鎖定時，`SKIP LOCKED` 會跳過鎖定中的列而可能湊不滿請求張數，立即回傳 `409 Conflict`（採快速失敗，而非阻塞等待前筆交易提交或回滾）。
 - **驗證測試**：`tests/test_tickets.py::test_concurrent_multi_user_race_on_same_seat_and_zone_allocation` 與 `tests/test_concurrency.py`。
 
 ---
@@ -254,8 +258,8 @@ Commit `276aece`、`d8c9926`（[`app/auth/dependencies.py:60-145`](https://githu
 | 3. 有效 Token（完整 `get_current_user`：Redis + DB 實體載入） | 610.4 | 41.269 | 93.452 | 184.346 |
 | 4. 直接查庫（Cache Miss Fallback） | 1,310.2 | 11.789 | 61.076 | 136.310 |
 
-- **解讀**：已作廢或惡意重放 Token 僅花 **+1.86 ms (p50)** 即在 Redis 層攔截，完全不消耗 DB 連線池。
-- **快取一致性與最長不一致時間**：正常時登出、停用或改角色會在 DB commit 後更新 Redis。若更新與刪除快取都失敗，Redis 的舊值最長可保留至 7 天 TTL；認證時若 Redis 版本落後於 Token，會回源核對 DB 並修正快取，因此不會因舊快取放行已撤銷的 Token。此時有效 Token 可能多一次 DB 查詢；不能把 Redis 快取本身的陳舊時間描述成 `0 ms`。
+- **解讀**：已作廢或惡意重放 Token 於 `cached_version > token_version` 時僅花 **+1.86 ms (p50)** 即在 Redis 層攔截，完全不消耗 DB 連線池。至於**有效 Token**，目前 `get_current_user` 每次請求都會查詢一次 PostgreSQL 載入 `User` 實體（供下游業務端點使用，並順便核對 `token_version` 與 `is_active`），這就是上表第 3 列 `41.269 ms` 的開銷來源。
+- **快取一致性與最長不一致時間**：正常時登出、停用或改角色會在 DB commit 後更新 Redis。若更新與刪除快取都失敗，Redis 內的舊值最長可保留至 7 天 TTL；但在認證流程中，只有 `cached_version > token_version` 會直接拒絕，其餘有效請求皆會進 DB 載入 `User` 並以資料庫的 `user.token_version` 為準，同時順便把落後的 Redis 快取修正回最新版本，因此不會因舊快取放行已撤銷 Token，也不會誤拒新簽發 Token。
 
 ### 5.2 使用者被停用時進行中之座位匯入任務處理
 
@@ -307,17 +311,19 @@ Commit `a96751a`（[`app/monitoring/collector.py`](https://github.com/CYLiao1127
   1. **延遲回填與數值「二次抬升」**：慢副本將當前流量寫入 `T - 20s` 的歷史秒桶；圖表上 `T` 秒先只顯示正常副本的一半 RPS，20 秒後 `T - 20s` 的歷史柱狀圖才會突然被補高（Upsert 累加）。
   2. **百分位合併**：慢副本遲到時，若直接用後到的 p50/p95/p99 覆蓋先前結果會失真。目前 Redis 會保留該秒的合併延遲樣本 1 小時；Worker 在窗口內合併原始樣本後重算百分位。超過窗口才到的資料無法與舊樣本精確合併。
   3. **視覺上誤判為雙波峰或流量下降**：在即時滾動 60 秒儀表板上，最新 20 秒區間會呈現「看起來少了一半流量」的假象。
+  - **替代方案**：若要從根源消除多副本本機時鐘偏差，可改在寫入秒桶時呼叫 `Redis TIME` 指令（或透過 Lua script 以 Redis 單一伺服器時鐘作為桶時間戳）。
 
 ### 6.4 兩個來源數字不一致時，相信哪一個？為什麼？
 
 - **原則**：永遠相信 **PostgreSQL 核心業務表（`orders`、`order_items`、`seats`）**，而非 Redis 監控計數器或即時指標圖表。
+- **具體不一致範例**：例如壓測時被 Nginx 邊緣限流直接回傳 `429` 的請求不會進入 FastAPI，因此 Nginx 層統計的總請求數會顯著高於 API 層的 `system_metrics.total_requests`；同理，當 Redis 監控計數器因網路抖動或重啟而與資料庫實際成交筆數出現落差時，對帳一律以 PostgreSQL 業務表為準。
 - **原因**：
   1. PostgreSQL 業務表受到 ACID 交易、條件原子更新與部分唯一索引 `uq_active_seat_order` 保護，是系統契約定義的 **Single Source of Truth（SSOT）**。
   2. Redis 監控指標與存取日誌為了不影響搶票主路徑吞吐量，採用最佳努力（best-effort）非阻塞寫入與 TTL 淘汰，在 Redis 故障、網路抖動或容器崩潰時允許極微量丟失，其職責是提供趨勢觀測與異常告警，而非帳務對帳依據。
 
 ---
 
-## 大數據串流 Excel 報表匯出設計（Commit 23）
+## 大數據串流 Excel 報表匯出設計（`8a2b0d8`）
 
 ### 1. API 規格
 
@@ -334,6 +340,8 @@ Commit `a96751a`（[`app/monitoring/collector.py`](https://github.com/CYLiao1127
 | `date_to` | `datetime \| null` | `null` | 篩選訂單建立時間終點（ISO 8601） |
 | `batch_size` | `int` (`100`–`10000`) | `1000` | PostgreSQL Server-side Cursor 單次 fetch 批次大小 |
 
+*(註：報表顯示時區目前由環境變數 `TIMEZONE` 統一設定，預設 `Asia/Taipei`，尚未開放單次請求動態傳入 `timezone` 查詢參數。另 50 萬筆基準實測採用 500,000 筆單張訂單〔`orders` 500,000 筆對應 `order_items` 500,000 列，1:1 對應〕，因此匯出的 `Details` 工作表同時代表 50 萬筆訂單與 50 萬列明細。)*
+
 ### 2. 512 MiB 常數記憶體架構與實測結果
 
 實作位於 [`app/reports/service.py`](https://github.com/CYLiao1127/flash-ticket/blob/8a2b0d83a50b1b8153853b86af49bc35866114e3/app/reports/service.py) 與 [`app/reports/router.py`](https://github.com/CYLiao1127/flash-ticket/blob/8a2b0d83a50b1b8153853b86af49bc35866114e3/app/reports/router.py)：
@@ -341,7 +349,7 @@ Commit `a96751a`（[`app/monitoring/collector.py`](https://github.com/CYLiao1127
 2. **`Details` 工作表**：PostgreSQL 具名游標（`report_details_server_cursor`, `itersize=batch_size`）`JOIN orders / order_items / seats / events / users`；所有時間轉換為 `Asia/Taipei` 並標註於表頭，所有金額以 `write_number(..., "#,##0.00")` 寫入為 Excel 數值型別（`t="n"`）。
 3. **磁碟備援真常數記憶體**：避開 `BytesIO` / `in_memory=True`（會覆蓋 `constant_memory`），改用 `tempfile.mkstemp` + `xlsxwriter.Workbook(tmp_path, {"constant_memory": True, "strings_to_urls": False})`，並以 64KB chunk `StreamingResponse` 輸出且於 `finally` 刪除暫存檔。
 
-#### 實測結果（512 MiB 限制的 `api-1` 容器，`memory.max = 536,870,912 bytes`，詳見 [`docs/evidence/q9_memory_profile.txt`](docs/evidence/q9_memory_profile.txt)）
+#### 實測結果（512 MiB 限制的 `api-1` 容器，`memory.max = 536,870,912 bytes`，詳見 [`docs/evidence/report_export_memory_profile.txt`](docs/evidence/report_export_memory_profile.txt)）
 
 | 測試模式 | 匯出筆數驗證 | `batch_size` | 耗時 | `.xlsx` 大小 | 記憶體峰值 | OOM 次數 |
 | :--- | :--- | ---: | ---: | ---: | :--- | ---: |
