@@ -116,12 +116,12 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 
 ### 3. 高併發搶票與交易
 
-- [ ] 指定座位選位購買
-- [ ] 區域配位（`SELECT FOR UPDATE SKIP LOCKED`，1~4 張）
-- [ ] 單人每場活動限購 4 張（原子級 `pg_advisory_xact_lock`）
-- [ ] 雙重防超賣保證（PostgreSQL 條件更新 + 部分唯一索引 `uq_active_seat_order`）
+- [x] 指定座位選位購買（條件原子更新 + 固定鎖順序防死結）
+- [x] 區域配位（`SELECT FOR UPDATE SKIP LOCKED`，1~4 張）
+- [x] 單人每場活動限購 4 張（原子級 `pg_advisory_xact_lock`）
+- [x] 雙重防超賣保證（PostgreSQL 條件更新 + 部分唯一索引 `uq_active_seat_order`）
 - [ ] 冪等性處理（Idempotency Key：成功 200、處理中 409、參數不符 422）
-- [ ] 5% 服務費精確四捨五入（整數運算）
+- [x] 5% 服務費精確四捨五入（`Decimal` `ROUND_HALF_UP`）
 - [ ] 模擬金流服務與 HMAC Webhook 簽章回呼
 - [ ] 逾時未付款自動釋放（DB-Clock `NOW()` 冪等釋放）
 - [ ] 逾時後 Webhook 到達的「復活 or 退款」事務處理
