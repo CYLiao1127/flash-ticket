@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flash Ticket — 後台即時監控與告警儀表板</title>
+  <link rel="stylesheet" href="./styles.css?v=26" />
+</head>
+<body class="admin-page">
+  <header>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">FT</span>
+      <div class="brand-copy">
+        <h1>Flash Ticket</h1>
+        <span class="brand-subtitle">OPERATIONS CONSOLE</span>
+      </div>
+      <span id="sseBadge" class="badge warn">告警串流未連線</span>
+    </div>
+    <nav class="nav-links">
+      <a href="./index.html">前台選位搶票</a>
+      <a href="./admin.html" class="active">後台即時監控</a>
+      <a href="/docs" target="_blank">Swagger API</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="page-intro">
+      <div>
+        <span class="eyebrow">Live operations</span>
+        <h2>營運儀表板</h2>
+        <p>即時掌握平台流量、服務延遲與購票異常，快速追蹤請求並管理使用者權限。</p>
+      </div>
+      <div class="intro-side">
+        <span class="badge info"><span aria-hidden="true">●</span> 每 2 秒更新</span>
+      </div>
+    </section>
+
+    <!-- Admin / Viewer 認證 -->
+    <section class="card auth-card">
+      <h2>
+        <span>管理員登入</span>
+        <span id="adminAuthStatus" class="badge warn">尚未登入</span>
+      </h2>
+      <div class="row">
+        <input id="adminEmail" type="email" value="admin@flashticket.com" placeholder="Email" />
+        <input id="adminPassword" type="password" value="AdminPass123!" placeholder="Password" />
+        <button id="btnAdminLogin">登入儀表板</button>
+        <button id="btnAdminLogout" class="secondary" disabled>登出</button>
+        <button class="secondary" data-role="admin">填入 Admin</button>
+        <button class="secondary" data-role="viewer">填入 Viewer</button>
+      </div>
+    </section>
+
+    <!-- 未登入提示 -->
+    <section id="adminAuthGate" class="card auth-gate-notice">
+      <strong>請先登入 Admin 或 Viewer 帳號以檢視即時監控儀表板</strong>
+      <p>登入後將顯示每秒 RPS、延遲百分位趨勢、SSE 即時異常告警與 X-Request-ID 全鏈路追蹤。</p>
+    </section>
+
+    <!-- 登入後顯示之監控主區 -->
+    <div id="adminWorkspace" class="workspace-body" hidden>
+    <!-- 即時 KPI 卡片 -->
+    <section class="grid-kpi">
+      <div class="kpi-card">
+        <div class="kpi-label">平均 RPS (近 60 秒)</div>
+        <div id="kpiRps" class="kpi-value">-</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">5xx 錯誤率</div>
+        <div id="kpiErrRate" class="kpi-value">-</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">峰值 p99 延遲 (ms)</div>
+        <div id="kpiP99" class="kpi-value">-</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">叢集即時連線數 (HTTP/SSE/WS)</div>
+        <div id="kpiConns" class="kpi-value">-</div>
+      </div>
+      <div class="kpi-card">
+        <div class="kpi-label">近期異常告警</div>
+        <div id="kpiAlerts" class="kpi-value">0</div>
+      </div>
+    </section>
+
+    <!-- 即時圖表與即時告警面板 -->
+    <div class="grid-2">
+      <section class="card">
+        <h2>
+          <span>流量與延遲趨勢</span>
+          <span id="lastUpdated" class="muted">等待資料...</span>
+        </h2>
+        <div class="muted chart-caption">每秒請求量（藍）／5xx 錯誤數（紅）</div>
+        <div class="chart-box"><svg id="chartRps" width="100%" height="100%"></svg></div>
+        <div class="muted chart-caption spaced">延遲百分位（毫秒）</div>
+        <div class="chart-box"><svg id="chartLatency" width="100%" height="100%"></svg></div>
+      </section>
+
+      <section class="card">
+        <h2>
+          <span>告警中心</span>
+          <button id="btnEvalAlerts" class="secondary" disabled>立即評估</button>
+        </h2>
+        <div id="alertsFeed" class="alerts-feed">
+          <div class="muted">登入 Admin / Viewer 後自動連線即時告警串流...</div>
+        </div>
+      </section>
+    </div>
+
+    <!-- X-Request-ID 全鏈路追蹤查詢 -->
+    <section class="card">
+      <h2>X-Request-ID 請求追蹤</h2>
+      <p class="section-note">輸入請求 ID，串聯 API 存取日誌與 Outbox 事件。</p>
+      <div class="row trace-controls">
+        <input id="traceInput" type="text" placeholder="輸入 X-Request-ID..." />
+        <button id="btnTrace" disabled>查詢全鏈路</button>
+        <button id="btnLoadLogs" class="secondary" disabled>載入最新存取日誌</button>
+      </div>
+      <div id="traceResult" class="log-box">等待查詢…</div>
+    </section>
+
+    <!-- Admin 使用者管理 -->
+    <section class="card">
+      <h2>
+        <span>使用者管理</span>
+        <button id="btnRefreshUsers" class="secondary" disabled>重新整理</button>
+      </h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>ID</th>
+              <th>Email</th>
+              <th>角色</th>
+              <th>狀態</th>
+              <th>Token Version</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="usersTableBody">
+            <tr><td colspan="6" class="muted">登入管理員帳號後載入使用者清單。</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+    </div>
+  </main>
+
+  <script src="./admin.js?v=30"></script>
+</body>
+</html>

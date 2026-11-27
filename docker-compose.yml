@@ -122,6 +122,7 @@ services:
       - "${APP_PORT:-8000}:80"
     volumes:
       - ./nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./frontend:/usr/share/nginx/html:ro
     depends_on:
       api-1:
         condition: service_healthy

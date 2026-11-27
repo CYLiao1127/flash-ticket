@@ -1,0 +1,147 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Flash Ticket — 即時搶票與座位圖</title>
+  <link rel="stylesheet" href="./styles.css?v=27" />
+</head>
+<body class="booking-page">
+  <header>
+    <div class="brand">
+      <span class="brand-mark" aria-hidden="true">FT</span>
+      <div class="brand-copy">
+        <h1>Flash Ticket</h1>
+        <span class="brand-subtitle">LIVE EVENT BOOKING</span>
+      </div>
+      <span id="wsBadge" class="badge warn">WS 未連線</span>
+    </div>
+    <nav class="nav-links">
+      <a href="./index.html" class="active">前台選位搶票</a>
+      <a href="./admin.html">後台即時監控</a>
+      <a href="/docs" target="_blank">Swagger API</a>
+    </nav>
+  </header>
+
+  <main class="container">
+    <section class="page-intro">
+      <div>
+        <span class="eyebrow">Your night, your seat</span>
+        <h2>好位置，<span class="accent-text">即時入座。</span></h2>
+        <p>挑選喜歡的活動與座位，座位狀態會即時同步。選好後送出訂單，精彩就此開始。</p>
+      </div>
+      <div class="intro-side">
+        <span id="seqBadge" class="badge info">last_seq: -</span>
+      </div>
+    </section>
+
+    <!-- 登入與快速切換種子帳號 -->
+    <section class="card auth-card">
+      <h2>
+        <span>登入你的帳號</span>
+        <span id="authStatus" class="badge warn">尚未登入</span>
+      </h2>
+      <div class="row">
+        <input id="loginEmail" type="email" value="user@flashticket.com" placeholder="Email" />
+        <input id="loginPassword" type="password" value="UserPass123!" placeholder="Password" />
+        <button id="btnLogin">登入</button>
+        <button id="btnLogout" class="secondary" disabled>登出</button>
+        <button class="secondary" data-fill="user">填入 User</button>
+        <button class="secondary" data-fill="admin">填入 Admin</button>
+      </div>
+      <div id="loginError" class="muted" style="color: var(--rose); margin-top: 8px;" hidden></div>
+    </section>
+
+    <!-- 未登入提示 -->
+    <section id="bookingAuthGate" class="card auth-gate-notice">
+      <strong>請先登入帳號以檢視即時剩餘座位</strong>
+      <p>登入後即可瀏覽活動分區、即時剩餘席次、互動選位圖與個人訂單狀態。</p>
+    </section>
+
+    <!-- 登入後顯示之主操作區 -->
+    <div id="bookingWorkspace" class="workspace-body" hidden>
+    <!-- 活動選擇與即時座位統計 -->
+    <section class="card">
+      <h2>
+        <span>Step 1 · 挑選活動</span>
+        <div id="eventStatGroup" class="stat-group" hidden>
+          <span id="statAvailable" class="badge ok">可選: 0</span>
+          <span id="statHeld" class="badge warn">鎖位中: 0</span>
+          <span id="statSold" class="badge err">已售出: 0</span>
+        </div>
+      </h2>
+      <div class="event-controls">
+        <select id="eventSelect" aria-label="選擇活動">
+          <option value="">-- 請選擇活動 --</option>
+        </select>
+        <select id="zoneFilter" aria-label="依區域篩選" disabled>
+          <option value="">請先選擇活動...</option>
+        </select>
+        <button id="btnReloadSnapshot" class="secondary" disabled>重新同步快照</button>
+      </div>
+    </section>
+
+    <div class="grid-2">
+      <!-- 未選活動提示 -->
+      <section id="seatStepGate" class="card auth-gate-notice">
+        <strong>請先於上方選擇一場活動</strong>
+        <p>選擇活動後，系統將即時連線 WebSocket 並展開該場次的分區座位圖。</p>
+      </section>
+
+      <!-- Step 2 · 即時互動座位圖（選擇活動後展開） -->
+      <section id="seatStepCard" class="card seat-card" hidden>
+        <h2>
+          <span>Step 2 · 選擇你的座位</span>
+          <span id="selectedInfo" class="selection-count">已選 0 / 4 張</span>
+        </h2>
+        <p class="section-note">點擊綠色座位選取，最多可選 4 張。座位狀態即時同步。</p>
+        <div class="legend">
+          <span><i class="dot available"></i>可選 (available)</span>
+          <span><i class="dot selected"></i>已選取</span>
+          <span><i class="dot held"></i>鎖位中 (held)</span>
+          <span><i class="dot sold"></i>已售出 (sold)</span>
+        </div>
+        <div id="seatGrid" class="seat-grid">
+          <div class="muted">請選擇活動載入座位快照...</div>
+        </div>
+        <div class="seat-actions">
+          <div class="seat-actions-main">
+          <button id="btnReserveSelected" disabled>指定選位購買</button>
+          <button id="btnClearSelection" class="secondary" disabled>清除選取</button>
+          </div>
+          <div class="seat-actions-auto">
+            <select id="allocZone"></select>
+            <select id="allocQty">
+              <option value="1">自動配位 1 張</option>
+              <option value="2">自動配位 2 張</option>
+              <option value="3">自動配位 3 張</option>
+              <option value="4">自動配位 4 張</option>
+            </select>
+            <button id="btnAutoAllocate" class="success" disabled>區域自動配位</button>
+          </div>
+        </div>
+      </section>
+
+      <!-- 即時事件流與我的訂單 -->
+      <div class="orders-column">
+        <section class="card">
+          <h2>
+            <span>我的訂單</span>
+            <button id="btnRefreshOrders" class="secondary" disabled>重整</button>
+          </h2>
+          <div id="ordersList" class="muted">登入後顯示您的訂單...</div>
+        </section>
+
+        <section class="card stream-card">
+          <h2>活動動態</h2>
+          <p class="section-note">訂單與座位變化會顯示在這裡。</p>
+          <div id="eventLog" class="log-box">等待操作...</div>
+        </section>
+      </div>
+    </div>
+    </div>
+  </main>
+
+  <script src="./booking.js?v=31"></script>
+</body>
+</html>

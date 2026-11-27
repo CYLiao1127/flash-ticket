@@ -146,8 +146,8 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 
 ### 6. 前台與監控介面
 
-- [ ] 使用者即時座位圖與選位/搶票介面
-- [ ] 營運與管理者即時監控儀表板
+- [x] 使用者即時座位圖與選位/搶票介面（Nginx 靜態託管：`http://localhost:8000/`，支援 WebSocket 即時變色與跳號補償）
+- [x] 營運與管理者即時監控儀表板（Nginx 靜態託管：`http://localhost:8000/admin.html`，含 RPS/延遲趨勢圖、SSE 告警面板與 `X-Request-ID` 追蹤）
 
 ### 7. 驗證與壓力測試
 
