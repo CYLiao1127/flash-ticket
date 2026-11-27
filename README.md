@@ -15,6 +15,41 @@ Flash Ticket 提供活動建立、選位購票與即時座位更新，也有供�
 
 ---
 
+## 專案目錄結構
+
+```text
+flash-ticket/
+├── app/                     # FastAPI 後端應用
+│   ├── auth/                # 認證、JWT token_version 即時作廢、RBAC 與預設帳號 Seed
+│   ├── core/                # Redis 連線、分散式 Request-ID 追蹤與結構化日誌
+│   ├── events/              # 活動 CRUD、樂觀鎖、Keyset 分頁、座位快照與 10 萬筆 COPY 匯入
+│   ├── tickets/             # 搶票選位／自動配位、單人 4 張限購、冪等鎖與 Outbox 序號
+│   ├── orders/              # 訂單查詢與使用者取消訂單
+│   ├── payments/            # 模擬金流、HMAC 簽章 Webhook、逾時釋放與遲到復活／退款
+│   ├── realtime/            # WebSocket 訂閱、EventBroadcastHub 與斷線補發
+│   ├── monitoring/          # 每秒指標收集、批次寫入、異常告警引擎、SSE 與 Admin 追蹤
+│   ├── reports/             # 512 MiB 串流 Excel 報表（Server-side Cursor + constant_memory）
+│   ├── workers/             # 背景 Worker（Leader Outbox Relay、逾時清理、退款、指標持久化）
+│   ├── models.py            # PostgreSQL ORM 模型與 uq_active_seat_order 部分唯一索引
+│   └── main.py              # FastAPI 進入點、路由掛載與中介層註冊
+├── frontend/                # Nginx 託管之前台即時選位（index.html）與後台監控（admin.html）
+├── migrations/              # Alembic 資料庫遷移腳本
+├── loadtests/               # k6 壓測腳本（情境 A 搶票、情境 B 2,000 WS）與資料準備腳本
+├── sample_data/             # 座位匯入範例檔（CSV / JSON 多元測資）
+├── scripts/                 # 壓測後一致性校驗、Token 效能量測、50 萬筆報表基準腳本
+├── tests/                   # 單元、整合、併發、故障恢復、授權矩陣與串流報表測試（83 項）
+├── docs/                    # 資料庫設計文件（DATABASE.md）與實測存證（evidence/）
+├── DESIGN.md                # 系統架構圖、設計假設取捨表與 Q1–Q6 完整設計問答
+├── LOADTEST.md              # 壓力測試報告、瓶頸分析與一致性驗證結果
+├── AI_USAGE.md              # AI 輔助開發分工與 6 處實戰問題修正紀錄
+├── docker-compose.yml       # 多副本部署（Nginx + api-1/2 + Worker + PostgreSQL + Redis）
+├── nginx.conf               # 負載均衡、邊緣限流、WebSocket 與無緩衝 SSE 設定
+├── Makefile                 # 一行指令啟動、測試、壓測與一致性校驗捷徑
+└── .env.example             # 環境變數範本與說明
+```
+
+---
+
 ## 啟動方式
 
 ### 設定環境變數
