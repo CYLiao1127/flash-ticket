@@ -1,0 +1,139 @@
+============================= test session starts ==============================
+platform linux -- Python 3.12.16, pytest-8.3.4, pluggy-1.7.0 -- /usr/local/bin/python3.12
+cachedir: .pytest_cache
+rootdir: /workspace
+plugins: asyncio-0.25.0, anyio-4.16.0
+asyncio: mode=Mode.STRICT, asyncio_default_fixture_loop_scope=None
+collecting ... collected 6 items
+
+tests/test_seat_import.py::test_csv_and_json_import_and_sha256_deduplication 2026-11-27 03:32:32 [INFO] [api-default] [-] [flash_ticket.api:20] Flash Ticket API service initializing...
+2026-11-27 03:32:32 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default admin account: admin@flashticket.com
+2026-11-27 03:32:32 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default user account: user@flashticket.com
+2026-11-27 03:32:33 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default viewer account: viewer@flashticket.com
+2026-11-27 03:32:33 [INFO] [api-default] [-] [flash_ticket.seed:63] [Seed] All default seed accounts verified successfully.
+2026-11-27 03:32:33 [INFO] [api-default] [43f6cba26fc54b8983a8444681183764] [flash_ticket.api:64] POST /api/v1/auth/login - status=200 latency=285.51ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:33 [INFO] [api-default] [e15a8e67af934051a61281a51205a62d] [flash_ticket.api:64] POST /api/v1/events - status=201 latency=56.12ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events "HTTP/1.1 201 Created"
+2026-11-27 03:32:33 [INFO] [api-default] [cc47a388d8e3460385122f9cf02b41e5] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=202 latency=57.54ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 202 Accepted"
+2026-11-27 03:32:33 [INFO] [api-default] [37978b59c1d347a08e07f4b07b6f6546] [flash_ticket.api:64] GET /api/v1/events/1/imports/1 - status=200 latency=26.74ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports/1 "HTTP/1.1 200 OK"
+2026-11-27 03:32:33 [INFO] [api-default] [033937d82a614ca19ea3d0801af7431b] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=202 latency=25.86ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 202 Accepted"
+2026-11-27 03:32:33 [INFO] [api-default] [f8906933fb974b37a94d9bd468925f52] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=202 latency=48.81ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 202 Accepted"
+2026-11-27 03:32:33 [INFO] [api-default] [c8bb1a3c2c3b4d2f9ed7af306a61ce09] [flash_ticket.api:64] GET /api/v1/events/1/imports/2 - status=200 latency=25.26ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports/2 "HTTP/1.1 200 OK"
+2026-11-27 03:32:33 [INFO] [api-default] [515b8ef2759a4374b239bdf6cada16ad] [flash_ticket.api:64] GET /api/v1/events/1/imports - status=200 latency=27.81ms client_ip=testclient
+2026-11-27 03:32:33 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports "HTTP/1.1 200 OK"
+PASSED2026-11-27 03:32:34 [INFO] [api-default] [-] [flash_ticket.api:22] Flash Ticket API service shutting down...
+
+tests/test_seat_import.py::test_import_all_or_nothing_vs_skip_invalid_and_error_reporting 2026-11-27 03:32:34 [INFO] [api-default] [-] [flash_ticket.api:20] Flash Ticket API service initializing...
+2026-11-27 03:32:34 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default admin account: admin@flashticket.com
+2026-11-27 03:32:34 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default user account: user@flashticket.com
+2026-11-27 03:32:34 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default viewer account: viewer@flashticket.com
+2026-11-27 03:32:34 [INFO] [api-default] [-] [flash_ticket.seed:63] [Seed] All default seed accounts verified successfully.
+2026-11-27 03:32:35 [INFO] [api-default] [a65fded0fd23449482c8d36c544241f8] [flash_ticket.api:64] POST /api/v1/auth/login - status=200 latency=270.96ms client_ip=testclient
+2026-11-27 03:32:35 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:35 [INFO] [api-default] [e611132404c84d8f97c251e83d980060] [flash_ticket.api:64] POST /api/v1/events - status=201 latency=53.57ms client_ip=testclient
+2026-11-27 03:32:35 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events "HTTP/1.1 201 Created"
+2026-11-27 03:32:35 [INFO] [api-default] [3eb5f50441bd43bbac742d1342c6d121] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=202 latency=49.02ms client_ip=testclient
+2026-11-27 03:32:35 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 202 Accepted"
+2026-11-27 03:32:35 [INFO] [api-default] [21c82dfeb30441db9a5590f94a67220a] [flash_ticket.api:64] GET /api/v1/events/1/imports/1 - status=200 latency=26.50ms client_ip=testclient
+2026-11-27 03:32:35 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports/1 "HTTP/1.1 200 OK"
+2026-11-27 03:32:35 [INFO] [api-default] [6c5c2c193c8045c8b1ff46ce608850e8] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=202 latency=48.85ms client_ip=testclient
+2026-11-27 03:32:35 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import?mode=skip_invalid "HTTP/1.1 202 Accepted"
+2026-11-27 03:32:35 [INFO] [api-default] [4f36398f855743b6a3c11a619124b958] [flash_ticket.api:64] GET /api/v1/events/1/imports/2 - status=200 latency=25.62ms client_ip=testclient
+2026-11-27 03:32:35 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports/2 "HTTP/1.1 200 OK"
+PASSED2026-11-27 03:32:35 [INFO] [api-default] [-] [flash_ticket.api:22] Flash Ticket API service shutting down...
+
+tests/test_seat_import.py::test_import_validation_limits_and_permissions 2026-11-27 03:32:35 [INFO] [api-default] [-] [flash_ticket.api:20] Flash Ticket API service initializing...
+2026-11-27 03:32:35 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default admin account: admin@flashticket.com
+2026-11-27 03:32:36 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default user account: user@flashticket.com
+2026-11-27 03:32:36 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default viewer account: viewer@flashticket.com
+2026-11-27 03:32:36 [INFO] [api-default] [-] [flash_ticket.seed:63] [Seed] All default seed accounts verified successfully.
+2026-11-27 03:32:36 [INFO] [api-default] [709a55176d984068b7f4c39a7d624cda] [flash_ticket.api:64] POST /api/v1/auth/login - status=200 latency=271.82ms client_ip=testclient
+2026-11-27 03:32:36 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:36 [INFO] [api-default] [83d108a2319849eb99ea7681ba0ce49f] [flash_ticket.api:64] POST /api/v1/auth/login - status=200 latency=267.39ms client_ip=testclient
+2026-11-27 03:32:36 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:37 [INFO] [api-default] [5623facbacfc45dfad54ff2e27c7c344] [flash_ticket.api:64] POST /api/v1/events - status=201 latency=49.48ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events "HTTP/1.1 201 Created"
+2026-11-27 03:32:37 [INFO] [api-default] [ffc9e18548824b24aeac1bffbb27d213] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=403 latency=22.91ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 403 Forbidden"
+2026-11-27 03:32:37 [INFO] [api-default] [2e113b83131f4c609aec8b360d1d6a8f] [flash_ticket.api:64] GET /api/v1/events/1/imports - status=403 latency=22.48ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports "HTTP/1.1 403 Forbidden"
+2026-11-27 03:32:37 [INFO] [api-default] [099b19ec36174082aaba6289439e88f7] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=400 latency=26.47ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 400 Bad Request"
+2026-11-27 03:32:37 [INFO] [api-default] [9934a021c0524c9991f7e46788f2f875] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=400 latency=159.80ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 400 Bad Request"
+2026-11-27 03:32:37 [INFO] [api-default] [ce244b09eed243b5a6c95209b8633c20] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=413 latency=140.41ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 413 Request Entity Too Large"
+2026-11-27 03:32:37 [INFO] [api-default] [c3a5713293884ca5bad9d2a3433e1968] [flash_ticket.api:64] POST /api/v1/events/1/publish - status=200 latency=78.53ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/publish "HTTP/1.1 200 OK"
+2026-11-27 03:32:37 [INFO] [api-default] [288320dce76f486c95e2ded826cf44ab] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=409 latency=26.71ms client_ip=testclient
+2026-11-27 03:32:37 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 409 Conflict"
+PASSED2026-11-27 03:32:37 [INFO] [api-default] [-] [flash_ticket.api:22] Flash Ticket API service shutting down...
+
+tests/test_seat_import.py::test_bulk_import_100k_rows_performance_and_progress_tracking 2026-11-27 03:32:37 [INFO] [api-default] [-] [flash_ticket.api:20] Flash Ticket API service initializing...
+2026-11-27 03:32:37 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default admin account: admin@flashticket.com
+2026-11-27 03:32:38 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default user account: user@flashticket.com
+2026-11-27 03:32:38 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default viewer account: viewer@flashticket.com
+2026-11-27 03:32:38 [INFO] [api-default] [-] [flash_ticket.seed:63] [Seed] All default seed accounts verified successfully.
+2026-11-27 03:32:38 [INFO] [api-default] [9a6758e1566a4dd9ab8a0dc03808c590] [flash_ticket.api:64] POST /api/v1/auth/login - status=200 latency=312.43ms client_ip=testclient
+2026-11-27 03:32:38 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:38 [INFO] [api-default] [d7fd73af33e94ef99d392e311c81de83] [flash_ticket.api:64] POST /api/v1/events - status=201 latency=50.42ms client_ip=testclient
+2026-11-27 03:32:38 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events "HTTP/1.1 201 Created"
+2026-11-27 03:32:39 [INFO] [api-default] [4e4567ee655e4a3a87bac8da59819381] [flash_ticket.api:64] POST /api/v1/events/1/seats/import - status=202 latency=185.19ms client_ip=testclient
+2026-11-27 03:32:42 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events/1/seats/import "HTTP/1.1 202 Accepted"
+2026-11-27 03:32:42 [INFO] [api-default] [09294efbdeff43bcaef8154c458a8dae] [flash_ticket.api:64] GET /api/v1/events/1/imports/1 - status=200 latency=28.59ms client_ip=testclient
+2026-11-27 03:32:42 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports/1 "HTTP/1.1 200 OK"
+[BENCHMARK] 100,000 rows COPY import elapsed=3.19s
+2026-11-27 03:32:42 [INFO] [api-default] [5ac92b34f2c44037b7bf21d705ae0dfc] [flash_ticket.api:64] POST /api/v1/events - status=201 latency=50.39ms client_ip=testclient
+2026-11-27 03:32:42 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events "HTTP/1.1 201 Created"
+PASSED2026-11-27 03:32:43 [INFO] [api-default] [-] [flash_ticket.api:22] Flash Ticket API service shutting down...
+
+tests/test_seat_import.py::test_import_exception_handling_stale_recovery_and_sse_stream 2026-11-27 03:32:43 [INFO] [api-default] [-] [flash_ticket.api:20] Flash Ticket API service initializing...
+2026-11-27 03:32:43 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default admin account: admin@flashticket.com
+2026-11-27 03:32:43 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default user account: user@flashticket.com
+2026-11-27 03:32:44 [INFO] [api-default] [-] [flash_ticket.seed:58] [Seed] Created default viewer account: viewer@flashticket.com
+2026-11-27 03:32:44 [INFO] [api-default] [-] [flash_ticket.seed:63] [Seed] All default seed accounts verified successfully.
+2026-11-27 03:32:44 [INFO] [api-default] [08aec0627b1e45019f05bdf4d6867b77] [flash_ticket.api:64] POST /api/v1/auth/login - status=200 latency=270.42ms client_ip=testclient
+2026-11-27 03:32:44 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:44 [INFO] [api-default] [271b61beeda348ae81d86251423004b2] [flash_ticket.api:64] POST /api/v1/auth/login - status=200 latency=266.57ms client_ip=testclient
+2026-11-27 03:32:44 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:44 [INFO] [api-default] [71d09c5985cb458f857bd075356ffb78] [flash_ticket.api:64] POST /api/v1/events - status=201 latency=49.13ms client_ip=testclient
+2026-11-27 03:32:44 [INFO] [api-default] [-] [httpx:1025] HTTP Request: POST http://testserver/api/v1/events "HTTP/1.1 201 Created"
+2026-11-27 03:32:44 [ERROR] [api-default] [-] [flash_ticket.import:491] Bulk seat import failed for job_id=1: Simulated DB error before COPY
+Traceback (most recent call last):
+  File "/workspace/app/events/import_service.py", line 359, in process_import_job
+    zone_rows = await progress_session.execute(
+                ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/workspace/tests/test_seat_import.py", line 479, in execute
+    raise RuntimeError("Simulated DB error before COPY")
+RuntimeError: Simulated DB error before COPY
+2026-11-27 03:32:45 [INFO] [api-default] [dbc2de4aa9b84bc2a843c8a01fe2681e] [flash_ticket.api:64] GET /api/v1/events/1/imports/3/stream - status=403 latency=37.13ms client_ip=testclient
+2026-11-27 03:32:45 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports/3/stream "HTTP/1.1 403 Forbidden"
+2026-11-27 03:32:45 [INFO] [api-default] [9bcfa3e33d32491ea9142432e4e0ad86] [flash_ticket.api:64] GET /api/v1/events/1/imports/3/stream - status=200 latency=31.92ms client_ip=testclient
+2026-11-27 03:32:45 [INFO] [api-default] [-] [httpx:1025] HTTP Request: GET http://testserver/api/v1/events/1/imports/3/stream "HTTP/1.1 200 OK"
+PASSED2026-11-27 03:32:47 [INFO] [api-default] [-] [flash_ticket.api:22] Flash Ticket API service shutting down...
+
+tests/test_seat_import.py::test_sse_progress_stream_unbuffered_through_nginx 2026-11-27 03:32:47 [INFO] [api-default] [-] [httpx:1740] HTTP Request: POST http://nginx/api/v1/auth/login "HTTP/1.1 200 OK"
+2026-11-27 03:32:47 [INFO] [api-default] [-] [httpx:1740] HTTP Request: POST http://nginx/api/v1/events "HTTP/1.1 201 Created"
+2026-11-27 03:32:47 [INFO] [api-default] [-] [httpx:1740] HTTP Request: GET http://nginx/api/v1/events/6/imports/6/stream "HTTP/1.1 200 OK"
+[NGINX_SSE] f1=pending@2026-11-27T03:32:47.598876Z | f2=processing(pub=2026-11-27T03:32:47.600345Z->arr=2026-11-27T03:32:47.600760Z) | f3=completed(pub=2026-11-27T03:32:47.901742Z->arr=2026-11-27T03:32:47.904785Z)
+PASSED2026-11-27 03:32:47 [ERROR] [api-default] [-] [asyncio:1833] Task was destroyed but it is pending!
+task: <Task pending name='Task-150' coro=<<async_generator_athrow without __name__>()>>
+
+
+=============================== warnings summary ===============================
+../usr/local/lib/python3.12/site-packages/starlette/testclient.py:40
+  /usr/local/lib/python3.12/site-packages/starlette/testclient.py:40: DeprecationWarning: The anyio.abc.BlockingPortal alias is deprecated, use anyio.from_thread.BlockingPortal instead.
+    _PortalFactoryType = typing.Callable[[], typing.ContextManager[anyio.abc.BlockingPortal]]
+
+../usr/local/lib/python3.12/site-packages/passlib/utils/__init__.py:854
+  /usr/local/lib/python3.12/site-packages/passlib/utils/__init__.py:854: DeprecationWarning: 'crypt' is deprecated and slated for removal in Python 3.13
+    from crypt import crypt as _crypt
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+======================== 6 passed, 2 warnings in 15.91s ========================

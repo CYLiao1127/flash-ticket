@@ -1,15 +1,36 @@
-from typing import Literal, Optional
-from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy.ext.asyncio import AsyncSession
+import json
+from typing import List, Literal, Optional
+from fastapi import (
+    APIRouter,
+    BackgroundTasks,
+    Depends,
+    File,
+    HTTPException,
+    Query,
+    UploadFile,
+    status,
+)
+from fastapi.responses import StreamingResponse
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from app.auth.dependencies import get_current_user, require_roles
+from app.core.redis import get_redis
 from app.db import get_db
+from app.events.import_service import (
+    get_import_job,
+    list_import_jobs,
+    process_import_job,
+    serialize_import_progress,
+    submit_seat_import,
+)
 from app.events.schemas import (
     EventCreateRequest,
     EventListResponse,
     EventResponse,
     EventSeatsSnapshotResponse,
     EventUpdateRequest,
+    ImportJobResponse,
 )
 from app.events.service import (
     create_event,
@@ -20,7 +41,15 @@ from app.events.service import (
     publish_event,
     update_event,
 )
-from app.models import EventStatus, SeatStatus, User, UserRole
+from app.models import (
+    EventStatus,
+    ImportJob,
+    ImportJobMode,
+    ImportJobStatus,
+    SeatStatus,
+    User,
+    UserRole,
+)
 
 router = APIRouter(prefix="/api/v1/events", tags=["Events"])
 
@@ -168,4 +197,170 @@ async def get_event_seats_snapshot_endpoint(
         status_filter=status_param,
         after_id=after_id,
         limit=limit,
+    )
+
+
+@router.post(
+    "/{event_id}/seats/import",
+    response_model=ImportJobResponse,
+    status_code=status.HTTP_202_ACCEPTED,
+    summary="批量匯入活動座位 (CSV / JSON，支援 SHA-256 去重與背景處理)",
+)
+async def import_seats_endpoint(
+    event_id: int,
+    background_tasks: BackgroundTasks,
+    file: UploadFile = File(..., description="CSV 或 JSON 座位檔案 (上限 20MB / 100,000 列)"),
+    mode: ImportJobMode = Query(
+        ImportJobMode.ALL_OR_NOTHING,
+        description="匯入模式：all_or_nothing (預設) 或 skip_invalid",
+    ),
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.USER)),
+    db: AsyncSession = Depends(get_db),
+):
+    """僅限活動建立者或 Admin 於草稿狀態匯入座位；重複上傳同內容檔案將回傳既有 Job"""
+    job, is_dup, parsed_rows = await submit_seat_import(
+        db, event_id, current_user, file, mode
+    )
+    if not is_dup and parsed_rows is not None:
+        session_factory = async_sessionmaker(
+            bind=db.bind,
+            class_=AsyncSession,
+            expire_on_commit=False,
+            autocommit=False,
+            autoflush=False,
+        )
+        background_tasks.add_task(
+            process_import_job, job.id, parsed_rows, session_factory
+        )
+
+    resp = ImportJobResponse.model_validate(job)
+    resp.is_duplicate = is_dup
+    return resp
+
+
+@router.get(
+    "/{event_id}/imports",
+    response_model=List[ImportJobResponse],
+    summary="查詢活動之所有座位匯入任務清單",
+)
+async def list_import_jobs_endpoint(
+    event_id: int,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.USER)),
+    db: AsyncSession = Depends(get_db),
+):
+    """僅限活動建立者或 Admin 查詢匯入任務清單"""
+    return await list_import_jobs(db, event_id, current_user)
+
+
+@router.get(
+    "/{event_id}/imports/{job_id}",
+    response_model=ImportJobResponse,
+    summary="查詢單一座位匯入任務進度與錯誤報告",
+)
+async def get_import_job_endpoint(
+    event_id: int,
+    job_id: int,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.USER)),
+    db: AsyncSession = Depends(get_db),
+):
+    """僅限活動建立者或 Admin 查詢匯入進度與原列號錯誤明細"""
+    return await get_import_job(db, event_id, job_id, current_user)
+
+
+@router.get(
+    "/{event_id}/imports/{job_id}/stream",
+    summary="SSE 即時推播單一座位匯入任務進度",
+)
+async def stream_import_job_progress_endpoint(
+    event_id: int,
+    job_id: int,
+    current_user: User = Depends(require_roles(UserRole.ADMIN, UserRole.USER)),
+    db: AsyncSession = Depends(get_db),
+):
+    """僅限活動建立者或 Admin 訂閱，透過 Server-Sent Events 即時推送批次匯入進度"""
+    initial_job = await get_import_job(db, event_id, job_id, current_user)
+    session_factory = async_sessionmaker(
+        bind=db.bind,
+        class_=AsyncSession,
+        expire_on_commit=False,
+        autocommit=False,
+        autoflush=False,
+    )
+
+    async def event_stream():
+        initial_payload = serialize_import_progress(initial_job)
+        if initial_job.status in (
+            ImportJobStatus.COMPLETED.value,
+            ImportJobStatus.FAILED.value,
+        ):
+            yield f"data: {json.dumps(initial_payload)}\n\n"
+            return
+
+        redis = get_redis()
+        pubsub = redis.pubsub()
+        channel = f"import_job:{job_id}:progress"
+        # 先訂閱再取快照與送出首幀，避免訂閱與快照間遺漏任何剛送出的推播
+        await pubsub.subscribe(channel)
+        try:
+            async with session_factory() as snap_sess:
+                fresh_job = (
+                    await snap_sess.execute(
+                        select(ImportJob).where(ImportJob.id == job_id)
+                    )
+                ).scalar_one_or_none()
+            snap_payload = serialize_import_progress(fresh_job or initial_job)
+            yield f"data: {json.dumps(snap_payload)}\n\n"
+            if snap_payload["status"] in (
+                ImportJobStatus.COMPLETED.value,
+                ImportJobStatus.FAILED.value,
+            ):
+                return
+
+            last_sent = snap_payload
+            while True:
+                msg = await pubsub.get_message(
+                    ignore_subscribe_messages=True, timeout=1.0
+                )
+                if msg is not None:
+                    data_str = msg["data"]
+                    if isinstance(data_str, bytes):
+                        data_str = data_str.decode("utf-8")
+                    yield f"data: {data_str}\n\n"
+                    parsed = json.loads(data_str)
+                    last_sent = parsed
+                    if parsed.get("status") in (
+                        ImportJobStatus.COMPLETED.value,
+                        ImportJobStatus.FAILED.value,
+                    ):
+                        break
+                else:
+                    async with session_factory() as poll_sess:
+                        latest = (
+                            await poll_sess.execute(
+                                select(ImportJob).where(ImportJob.id == job_id)
+                            )
+                        ).scalar_one_or_none()
+                        if latest is None:
+                            break
+                        current_payload = serialize_import_progress(latest)
+                        if current_payload != last_sent:
+                            yield f"data: {json.dumps(current_payload)}\n\n"
+                            last_sent = current_payload
+                        if latest.status in (
+                            ImportJobStatus.COMPLETED.value,
+                            ImportJobStatus.FAILED.value,
+                        ):
+                            break
+        finally:
+            await pubsub.unsubscribe(channel)
+            await pubsub.aclose()
+
+    return StreamingResponse(
+        event_stream(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
     )

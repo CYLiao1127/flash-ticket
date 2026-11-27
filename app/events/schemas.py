@@ -172,3 +172,27 @@ class EventSeatsSnapshotResponse(BaseModel):
     seats: List[SeatSnapshotItem]
     next_after_id: Optional[int] = None
     has_more: bool
+
+
+class ImportErrorItem(BaseModel):
+    row: int = Field(..., description="原始列號 (CSV 由第 2 列起算，JSON 由第 1 項起算)")
+    reason: str = Field(..., description="錯誤原因")
+
+
+class ImportJobResponse(BaseModel):
+    id: int
+    event_id: int
+    user_id: int
+    file_sha256: str
+    filename: str
+    total_rows: int
+    imported_rows: int
+    error_rows: int
+    mode: str
+    status: str
+    errors: List[ImportErrorItem]
+    is_duplicate: bool = False
+    created_at: datetime
+    updated_at: datetime
+
+    model_config = ConfigDict(from_attributes=True)

@@ -28,6 +28,7 @@ from sqlalchemy import (
     UniqueConstraint,
     CheckConstraint,
     Index,
+    func,
     text,
 )
 from sqlalchemy.dialects.postgresql import JSONB
@@ -135,6 +136,7 @@ class User(Base):
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
+      onupdate=func.now(),
       server_onupdate=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
@@ -204,6 +206,7 @@ class Event(Base):
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
+      onupdate=func.now(),
       server_onupdate=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
@@ -303,6 +306,7 @@ class Seat(Base):
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
+      onupdate=func.now(),
       server_onupdate=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
@@ -399,6 +403,7 @@ class Order(Base):
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
+      onupdate=func.now(),
       server_onupdate=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )
@@ -594,6 +599,7 @@ class ImportJob(Base):
   updated_at = Column(
       DateTime(timezone=True),
       server_default=text("CURRENT_TIMESTAMP"),
+      onupdate=func.now(),
       server_onupdate=text("CURRENT_TIMESTAMP"),
       nullable=False,
   )

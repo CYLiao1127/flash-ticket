@@ -29,3 +29,4 @@ Thumbs.db
 loadtest-results/
 *.k6.json
 scripts/*_100k.*
+sample_data/*_100k.*

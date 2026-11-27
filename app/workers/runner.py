@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.logging import request_id_ctx, setup_logging
 from app.core.redis import close_redis, get_redis
+from app.events.import_service import recover_stale_import_jobs
 from app.models import EventOutbox, OutboxStatus
 from app.db import AsyncSessionLocal
 
@@ -106,6 +107,9 @@ async def main():
                     processed = await poll_and_relay_outbox(session)
                     if processed > 0:
                         logger.debug(f"Relayed {processed} outbox events.")
+                    recovered = await recover_stale_import_jobs(session)
+                    if recovered > 0:
+                        logger.warning(f"Recovered {recovered} stale import jobs as failed.")
             except Exception as e:
                 logger.error(f"Worker encountered error: {e}", exc_info=True)
 

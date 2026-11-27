@@ -165,6 +165,8 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      nginx:
+        condition: service_started
 
 volumes:
   postgres_data:

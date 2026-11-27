@@ -69,6 +69,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - **資料庫設計與 Schema 規範**：[docs/DATABASE.md](file:///Users/liao/Documents/flash-ticket/docs/DATABASE.md)（含完整 Mermaid ERD、欄位字典、防超賣部分索引與狀態機生命週期）
 - **AI 輔助開發日誌與除錯覆盤**：[AI_USAGE.md](file:///Users/liao/Documents/flash-ticket/AI_USAGE.md)（記錄真實開發中 AI 產出錯誤與修正案例）
 - **Token 即時作廢與認證相依層效能基準量測 (Q5.1)**：[docs/evidence/q5_token_benchmark.txt](file:///Users/liao/Documents/flash-ticket/docs/evidence/q5_token_benchmark.txt)（包含無狀態 JWT、Redis 快速失敗攔截、完整 `get_current_user` 與資料庫直查之延遲百分位數對比報告）
+- **大量座位匯入與經 Nginx 無緩衝 SSE 實測紀錄**：[docs/evidence/c08_seat_import_and_sse.txt](file:///Users/liao/Documents/flash-ticket/docs/evidence/c08_seat_import_and_sse.txt)（100,000 列 PostgreSQL `COPY` 耗時與經 Nginx 逐幀即時送達實測）
 
 ### 全鏈路分散式追蹤 (Distributed Tracing Architecture)
 系統全面支援以 `X-Request-ID` 為核心的端到端分散式鏈路追蹤：
@@ -106,10 +107,10 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - [x] 已有訂單之活動禁止刪除保護
 - [x] 活動狀態機（草稿 vs. 已發布）
 - [x] 座位狀態快照 API（`GET /api/v1/events/{id}/seats`，含 `last_seq` 與分區統計）
-- [ ] 批量匯入座位（CSV / JSON，20MB / 10 萬筆 < 60 秒）
-- [ ] 匯入模式支援（`all_or_nothing` 與 `skip_invalid`）
-- [ ] 重複檔案 SHA-256 去重（回傳既有 Job）
-- [ ] 匯入進度即時查詢與錯誤列報告（原列號 + 錯誤原因）
+- [x] 批量匯入座位（CSV / JSON，20MB / 10 萬筆 PostgreSQL `COPY` 寫入，附 `sample_data/` 範例）
+- [x] 匯入模式支援（`all_or_nothing` 與 `skip_invalid`）
+- [x] 重複檔案 SHA-256 去重（回傳既有 Job）
+- [x] 匯入進度即時查詢與 SSE 進度推播、遺留任務恢復及錯誤列報告（`/imports/{job_id}`、`/stream`，含原列號與錯誤原因）
 - [ ] 即時座位狀態推播（WebSocket / SSE）
 
 ### 3. 高併發搶票與交易
