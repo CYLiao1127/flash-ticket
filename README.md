@@ -33,12 +33,13 @@ docker compose up -d --build
 
 服務啟動後各入口如下：
 
-- **Web 服務與 API 閘道**：`http://localhost:8000`
+- **前台即時選位搶票介面**：`http://localhost:8000/`
+- **後台即時監控與告警儀表板**：`http://localhost:8000/admin.html`
 - **Swagger API 互動文件**：`http://localhost:8000/docs`
 - **ReDoc API 文件**：`http://localhost:8000/redoc`
 - **健康檢查端點**：`http://localhost:8000/health`
 
-### 3. 一行指令執行自動化測試與基準壓測
+### 3. 一行指令執行自動化測試、壓力測試與一致性校驗
 
 ```bash
 # 執行全套自動化測試
@@ -48,8 +49,22 @@ docker compose --profile testing run --rm test
 
 # 執行 Token 即時作廢與認證相依層效能基準測試 (Q5.1)
 make benchmark-auth
-# 或
-docker compose --profile testing run --rm test python scripts/benchmark_token_revocation.py
+
+# === k6 高併發壓力測試與一致性校驗 ===
+# 1. 準備壓測資料（建立 10,000 座位活動與 3,000 組 JWT Token，有效期 60 分鐘）
+make loadtest-prepare
+
+# 2. 情境 A：高併發搶票壓測（3,000 VU / 10,000 座位 / 60 秒）
+make loadtest-a
+# （本機輕量穩態觀測版：300 VU / 30 秒）
+docker run --rm --network flash-ticket_default -v "$PWD/loadtests:/loadtests" \
+  -e TARGET_VUS=300 -e DURATION=30s grafana/k6 run --discard-response-bodies /loadtests/scenario_a_booking.js
+
+# 3. 情境 B：2,000 條即時 WebSocket 訂閱連線壓測
+make loadtest-b
+
+# 4. 壓測後自動化資料一致性校驗（零超賣、單人 <= 4 張、Outbox 連號）
+make verify-consistency
 ```
 
 ---
@@ -71,6 +86,7 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - **Token 即時作廢與認證相依層效能基準量測 (Q5.1)**：[docs/evidence/q5_token_benchmark.txt](file:///Users/liao/Documents/flash-ticket/docs/evidence/q5_token_benchmark.txt)（包含無狀態 JWT、Redis 快速失敗攔截、完整 `get_current_user` 與資料庫直查之延遲百分位數對比報告）
 - **大量座位匯入與經 Nginx 無緩衝 SSE 實測紀錄**：[docs/evidence/c08_seat_import_and_sse.txt](file:///Users/liao/Documents/flash-ticket/docs/evidence/c08_seat_import_and_sse.txt)（100,000 列 PostgreSQL `COPY` 耗時與經 Nginx 逐幀即時送達實測）
 - **雙重防超賣破壞性實驗與超賣復現存證 (Q1.3)**：[docs/evidence/q1_deliberate_failure.log](file:///Users/liao/Documents/flash-ticket/docs/evidence/q1_deliberate_failure.log)（實驗 A 拔除部分唯一索引仍擋住 30 併發；實驗 B 拔除條件更新重現 30× 超賣後於 Commit 14 還原）
+- **高併發壓力測試與一致性驗證報告**：[LOADTEST.md](file:///Users/liao/Documents/flash-ticket/LOADTEST.md)（情境 A/B 真實 k6 量測數據、WebSocket 連線池瓶頸修復前後對比與六大不變量校驗結果）
 
 ### 全鏈路分散式追蹤 (Distributed Tracing Architecture)
 系統全面支援以 `X-Request-ID` 為核心的端到端分散式鏈路追蹤：
@@ -153,6 +169,6 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 
 - [ ] 一行指令執行全部測試（單元、整合、併發）
 - [x] 刻意破壞鎖機制的超賣復現存證（Q1 驗證，Commit 13 `4c7af9b` → Commit 14 還原）
-- [ ] 情境 A 壓測（3,000 VU / 10,000 座位持續 60 秒）
-- [ ] 情境 B 壓測（2,000 條即時 WebSocket 連線訂閱）
-- [ ] 壓測後數據一致性校驗腳本（售出數 == 訂單票券數）
+- [x] 情境 A 壓測（3,000 VU / 10,000 座位持續 60 秒完整通過：搭配 Nginx 邊緣限流後 `booking_server_5xx = 4.31% < 5%`、Checks 95.67%、六大一致性全過，詳見 [`LOADTEST.md`](LOADTEST.md)）
+- [x] 情境 B 壓測（2,000 條即時 WebSocket 連線訂閱，實測 97.75% 連線成功率，見 [`LOADTEST.md`](LOADTEST.md)）
+- [x] 壓測後數據一致性校驗腳本（[`scripts/verify_consistency.py`](scripts/verify_consistency.py)，六大不變量全數通過）

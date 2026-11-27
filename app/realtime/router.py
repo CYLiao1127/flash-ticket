@@ -1,8 +1,9 @@
 """即時座位廣播 WebSocket 端點與斷線補償 API 路由 (Commit 20 / Q4)"""
 
+from contextlib import asynccontextmanager
 import json
 import logging
-from typing import Optional
+from typing import AsyncIterator, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query, WebSocket, WebSocketDisconnect, status
 import jwt
@@ -152,6 +153,22 @@ async def get_event_updates_recovery_endpoint(
     )
 
 
+@asynccontextmanager
+async def _short_lived_db_session(websocket: WebSocket) -> AsyncIterator[AsyncSession]:
+    """
+    為 WebSocket 握手與補發查詢開啟短生命週期 DB Session，查詢結束即刻歸還連線池，
+    絕不在長連線等待期間佔用 PostgreSQL 連線（否則 2000 條 WS 會立刻耗盡連線池）。
+    支援測試環境的 `app.dependency_overrides[get_db]`。
+    """
+    dep = websocket.app.dependency_overrides.get(get_db, get_db)
+    gen = dep()
+    session = await gen.__anext__()
+    try:
+        yield session
+    finally:
+        await gen.aclose()
+
+
 @ws_router.websocket("/ws/events/{event_id}")
 async def event_seats_websocket_endpoint(
     websocket: WebSocket,
@@ -160,11 +177,11 @@ async def event_seats_websocket_endpoint(
     last_seq: Optional[int] = Query(
         None, ge=0, description="斷線重連時攜帶最後收到的 sequence_id 以自動補償"
     ),
-    db: AsyncSession = Depends(get_db),
 ):
     """
     即時座位狀態 WebSocket 訂閱端點 (Q4)：
     - 支援透過 `?token=<jwt>` 或 `Authorization: Bearer <jwt>` 認證並檢查 token_version。
+    - 僅於握手與補發查詢期間短暫借用 DB 連線，進入長連線迴圈前即歸還連線池（支撐 2000+ 併發 WS）。
     - 連線後立即推送 `connected` 握手幀（含當前 `last_seq`）。
     - 若攜帶 `last_seq` 且落後於最新序號，自動補發缺失增量事件或提示 `resync_required` 重拉快照。
     - 透過 EventBroadcastHub 訂閱 Redis Pub/Sub 跨節點廣播，並保護慢客戶端不造成 OOM。
@@ -175,17 +192,18 @@ async def event_seats_websocket_endpoint(
         if auth_header.lower().startswith("bearer "):
             raw_token = auth_header[7:].strip()
 
-    user = await _authenticate_ws_token(raw_token, db)
-    if not user:
-        await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="Unauthorized or revoked token")
-        return
+    async with _short_lived_db_session(websocket) as db:
+        user = await _authenticate_ws_token(raw_token, db)
+        if not user:
+            await websocket.close(code=WS_CLOSE_UNAUTHORIZED, reason="Unauthorized or revoked token")
+            return
 
-    event_exists = (
-        await db.execute(select(Event.id).where(Event.id == event_id))
-    ).scalar_one_or_none()
-    if event_exists is None:
-        await websocket.close(code=WS_CLOSE_NOT_FOUND, reason="Event not found")
-        return
+        event_exists = (
+            await db.execute(select(Event.id).where(Event.id == event_id))
+        ).scalar_one_or_none()
+        if event_exists is None:
+            await websocket.close(code=WS_CLOSE_NOT_FOUND, reason="Event not found")
+            return
 
     # 先完成 accept 與 Redis Pub/Sub 訂閱就緒（Subscribe-Before-Snapshot），
     # 並啟用 `buffer_live_until_ready=True` 暫存期間湧入的即時事件，
@@ -205,44 +223,25 @@ async def event_seats_websocket_endpoint(
         return
 
     try:
-        current_last_seq = int(
-            (
-                await db.execute(
-                    select(Event.last_seq)
-                    .where(Event.id == event_id)
-                    .execution_options(populate_existing=True)
-                )
-            ).scalar_one()
-            or 0
-        )
-
-        # 1. 送出連線握手幀
-        welcome = json.dumps(
-            {
-                "type": "connected",
-                "event_id": event_id,
-                "last_seq": current_last_seq,
-                "server_instance": settings.INSTANCE_ID,
-            }
-        )
-        client.try_enqueue(welcome)
-
-        high_watermark = current_last_seq
-        # 2. 若客戶端攜帶 last_seq（斷線重連），自動執行增量補償或通知重拉快照
-        if last_seq is not None and last_seq != current_last_seq:
-            if last_seq > current_last_seq or (current_last_seq - last_seq) > WS_MAX_CATCHUP_EVENTS:
-                client.try_enqueue(
-                    json.dumps(
-                        {
-                            "type": "resync_required",
-                            "event_id": event_id,
-                            "requested_after_seq": last_seq,
-                            "current_last_seq": current_last_seq,
-                            "snapshot_url": f"/api/v1/events/{event_id}/seats",
-                        }
+        # 短暫借用 DB 讀取最新 last_seq 與補發事件，出 with 區塊立即釋放 DB 連線
+        missed_rows = []
+        async with _short_lived_db_session(websocket) as db:
+            current_last_seq = int(
+                (
+                    await db.execute(
+                        select(Event.last_seq)
+                        .where(Event.id == event_id)
+                        .execution_options(populate_existing=True)
                     )
-                )
-            else:
+                ).scalar_one()
+                or 0
+            )
+            if (
+                last_seq is not None
+                and last_seq != current_last_seq
+                and last_seq <= current_last_seq
+                and (current_last_seq - last_seq) <= WS_MAX_CATCHUP_EVENTS
+            ):
                 missed_rows = list(
                     (
                         await db.execute(
@@ -258,41 +257,60 @@ async def event_seats_websocket_endpoint(
                     .scalars()
                     .all()
                 )
-                if len(missed_rows) > WS_MAX_CATCHUP_EVENTS:
-                    client.try_enqueue(
-                        json.dumps(
-                            {
-                                "type": "resync_required",
-                                "event_id": event_id,
-                                "requested_after_seq": last_seq,
-                                "current_last_seq": current_last_seq,
-                                "snapshot_url": f"/api/v1/events/{event_id}/seats",
-                            }
-                        )
+
+        # 1. 送出連線握手幀
+        welcome = json.dumps(
+            {
+                "type": "connected",
+                "event_id": event_id,
+                "last_seq": current_last_seq,
+                "server_instance": settings.INSTANCE_ID,
+            }
+        )
+        client.try_enqueue(welcome)
+
+        high_watermark = current_last_seq
+        # 2. 若客戶端攜帶 last_seq（斷線重連），自動執行增量補償或通知重拉快照
+        if last_seq is not None and last_seq != current_last_seq:
+            if (
+                last_seq > current_last_seq
+                or (current_last_seq - last_seq) > WS_MAX_CATCHUP_EVENTS
+                or len(missed_rows) > WS_MAX_CATCHUP_EVENTS
+            ):
+                client.try_enqueue(
+                    json.dumps(
+                        {
+                            "type": "resync_required",
+                            "event_id": event_id,
+                            "requested_after_seq": last_seq,
+                            "current_last_seq": current_last_seq,
+                            "snapshot_url": f"/api/v1/events/{event_id}/seats",
+                        }
                     )
-                else:
-                    for row in missed_rows:
-                        delta_msg = json.dumps(
-                            {
-                                "type": "catchup",
-                                "outbox_id": row.id,
-                                "event_id": row.event_id,
-                                "sequence_id": row.sequence_id,
-                                "event_type": row.event_type,
-                                "payload": row.payload or {},
-                            }
-                        )
-                        if not client.try_enqueue(delta_msg):
-                            await client.close(code=1008, reason="Slow client buffer overflow")
-                            return
-                        high_watermark = max(high_watermark, int(row.sequence_id))
+                )
+            else:
+                for row in missed_rows:
+                    delta_msg = json.dumps(
+                        {
+                            "type": "catchup",
+                            "outbox_id": row.id,
+                            "event_id": row.event_id,
+                            "sequence_id": row.sequence_id,
+                            "event_type": row.event_type,
+                            "payload": row.payload or {},
+                        }
+                    )
+                    if not client.try_enqueue(delta_msg):
+                        await client.close(code=1008, reason="Slow client buffer overflow")
+                        return
+                    high_watermark = max(high_watermark, int(row.sequence_id))
 
         # 3. 依 sequence_id 去重並排序沖刷快照／補發期間暫存的即時事件，切換為即時串流模式
         if not client.flush_live_buffer(min_sequence_exclusive=high_watermark):
             await client.close(code=1008, reason="Slow client buffer overflow")
             return
 
-        # 3. 維持連線並處理心跳 ping
+        # 4. 維持連線並處理心跳 ping（此時已完全不佔用任何 PostgreSQL 連線！）
         while not client.closed:
             incoming = await websocket.receive_text()
             if incoming.strip().lower() == "ping":

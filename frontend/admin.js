@@ -27,7 +27,21 @@
     return body;
   }
 
-  function renderPolylineChart(svgId, seriesList) {
+  function _fmtTime(ts) {
+    if (!ts) return "";
+    const d = new Date(ts);
+    return d.toLocaleTimeString([], { hour12: false, hour: "2-digit", minute: "2-digit", second: "2-digit" });
+  }
+
+  function _svgEl(tag, attrs = {}, textContent = null) {
+    const el = document.createElementNS("http://www.w3.org/2000/svg", tag);
+    for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
+    if (textContent !== null) el.textContent = textContent;
+    return el;
+  }
+
+  function renderPolylineChart(svgId, seriesList, options = {}) {
+    const { timestamps = [], yUnit = "", xLabel = "時間 (HH:MM:SS)" } = options;
     const svg = $(svgId);
     const w = svg.clientWidth || 640;
     const h = svg.clientHeight || 170;
@@ -36,32 +50,126 @@
 
     const allValues = seriesList.flatMap((s) => s.values);
     if (allValues.length === 0) {
-      svg.innerHTML = `<text x="16" y="30" fill="#94a3b8" font-size="12">尚無每秒指標資料</text>`;
+      svg.appendChild(_svgEl("text", { x: 16, y: 30, fill: "#7a7f76", "font-size": 12 }, "尚無每秒指標資料"));
       return;
     }
 
     const maxVal = Math.max(1, ...allValues);
-    const padX = 12, padY = 14;
-    const usableW = w - padX * 2;
-    const usableH = h - padY * 2;
+    const padLeft = 56;
+    const padRight = 14;
+    const padTop = 22;
+    const padBottom = 28;
+    const usableW = Math.max(20, w - padLeft - padRight);
+    const usableH = Math.max(20, h - padTop - padBottom);
 
+    // Y 軸單位標示
+    if (yUnit) {
+      svg.appendChild(
+        _svgEl("text", { x: 4, y: 13, fill: "#6d726a", "font-size": 10, "font-weight": 700 }, `單位: ${yUnit}`)
+      );
+    }
+
+    // 水平參考格線與 Y 軸刻度 (0%, 50%, 100%)
+    for (const ratio of [0, 0.5, 1]) {
+      const y = h - padBottom - ratio * usableH;
+      const tickVal = maxVal * ratio;
+      const tickText = tickVal >= 100 ? Math.round(tickVal).toString() : tickVal.toFixed(ratio === 0 ? 0 : 1);
+      svg.appendChild(
+        _svgEl("line", {
+          x1: padLeft,
+          y1: y.toFixed(1),
+          x2: w - padRight,
+          y2: y.toFixed(1),
+          stroke: ratio === 0 ? "#cfc8bc" : "#e6e0d5",
+          "stroke-width": 1,
+          "stroke-dasharray": ratio === 0 ? "none" : "3,3",
+        })
+      );
+      svg.appendChild(
+        _svgEl(
+          "text",
+          { x: padLeft - 6, y: (y + 3.5).toFixed(1), fill: "#6d726a", "font-size": 10, "text-anchor": "end" },
+          tickText
+        )
+      );
+    }
+
+    // Y 軸主線
+    svg.appendChild(
+      _svgEl("line", {
+        x1: padLeft,
+        y1: padTop,
+        x2: padLeft,
+        y2: h - padBottom,
+        stroke: "#cfc8bc",
+        "stroke-width": 1,
+      })
+    );
+
+    // X 軸時間刻度（起點 / 中點 / 終點）與軸名
+    if (timestamps.length > 0) {
+      const idxs =
+        timestamps.length === 1
+          ? [0]
+          : timestamps.length === 2
+          ? [0, 1]
+          : [0, Math.floor((timestamps.length - 1) / 2), timestamps.length - 1];
+      const step = timestamps.length > 1 ? usableW / (timestamps.length - 1) : 0;
+      idxs.forEach((idx, pos) => {
+        const x = padLeft + idx * step;
+        const anchor = pos === 0 ? "start" : pos === idxs.length - 1 ? "end" : "middle";
+        svg.appendChild(
+          _svgEl(
+            "text",
+            { x: x.toFixed(1), y: h - 11, fill: "#6d726a", "font-size": 10, "text-anchor": anchor },
+            _fmtTime(timestamps[idx])
+          )
+        );
+      });
+    }
+    svg.appendChild(
+      _svgEl(
+        "text",
+        { x: (padLeft + usableW / 2).toFixed(1), y: h - 1, fill: "#8c9188", "font-size": 9.5, "text-anchor": "middle" },
+        xLabel
+      )
+    );
+
+    // 右上角圖例
+    let legendX = w - padRight;
+    for (let i = seriesList.length - 1; i >= 0; i--) {
+      const s = seriesList[i];
+      if (!s.label) continue;
+      const lbl = _svgEl(
+        "text",
+        { x: legendX, y: 13, fill: s.color, "font-size": 10, "font-weight": 700, "text-anchor": "end" },
+        `● ${s.label}`
+      );
+      svg.appendChild(lbl);
+      legendX -= s.label.length * 7 + 26;
+    }
+
+    // 繪製折線
     for (const s of seriesList) {
       if (s.values.length === 0) continue;
       const step = s.values.length > 1 ? usableW / (s.values.length - 1) : 0;
       const pts = s.values
         .map((v, i) => {
-          const x = padX + i * step;
-          const y = h - padY - (v / maxVal) * usableH;
+          const x = padLeft + i * step;
+          const y = h - padBottom - (v / maxVal) * usableH;
           return `${x.toFixed(1)},${y.toFixed(1)}`;
         })
         .join(" ");
 
-      const poly = document.createElementNS("http://www.w3.org/2000/svg", "polyline");
-      poly.setAttribute("fill", "none");
-      poly.setAttribute("stroke", s.color);
-      poly.setAttribute("stroke-width", "2.2");
-      poly.setAttribute("points", pts);
-      svg.appendChild(poly);
+      svg.appendChild(
+        _svgEl("polyline", {
+          fill: "none",
+          stroke: s.color,
+          "stroke-width": 2.2,
+          "stroke-linejoin": "round",
+          points: pts,
+        })
+      );
     }
   }
 
@@ -96,15 +204,24 @@
       $("lastUpdated").textContent = `更新時間: ${new Date().toLocaleTimeString()}`;
 
       const rows = data.series || [];
-      renderPolylineChart("chartRps", [
-        { color: "#477f9e", values: rows.map((r) => Number(r.total_requests)) },
-        { color: "#cf4d55", values: rows.map((r) => Number(r.error_requests)) },
-      ]);
-      renderPolylineChart("chartLatency", [
-        { color: "#27866a", values: rows.map((r) => Number(r.p50_latency_ms)) },
-        { color: "#b7791f", values: rows.map((r) => Number(r.p95_latency_ms)) },
-        { color: "#cf4d55", values: rows.map((r) => Number(r.p99_latency_ms)) },
-      ]);
+      const timestamps = rows.map((r) => r.timestamp);
+      renderPolylineChart(
+        "chartRps",
+        [
+          { label: "RPS", color: "#477f9e", values: rows.map((r) => Number(r.total_requests)) },
+          { label: "5xx", color: "#cf4d55", values: rows.map((r) => Number(r.error_requests)) },
+        ],
+        { timestamps, yUnit: "req/s", xLabel: "時間 (HH:MM:SS)" }
+      );
+      renderPolylineChart(
+        "chartLatency",
+        [
+          { label: "p50", color: "#27866a", values: rows.map((r) => Number(r.p50_latency_ms)) },
+          { label: "p95", color: "#b7791f", values: rows.map((r) => Number(r.p95_latency_ms)) },
+          { label: "p99", color: "#cf4d55", values: rows.map((r) => Number(r.p99_latency_ms)) },
+        ],
+        { timestamps, yUnit: "ms", xLabel: "時間 (HH:MM:SS)" }
+      );
     } catch (err) {
       $("lastUpdated").textContent = `讀取失敗: ${err.message}`;
     }
