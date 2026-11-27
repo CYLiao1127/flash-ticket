@@ -8,6 +8,7 @@ from app.core.redis import close_redis
 from app.auth.router import router as auth_router, admin_users_router
 from app.events.router import router as events_router
 from app.tickets.router import router as tickets_router, admin_tickets_router
+from app.payments.router import orders_router, payments_router
 from app.auth.dependencies import public_endpoint
 
 logger = logging.getLogger("flash_ticket.api")
@@ -37,6 +38,8 @@ app.include_router(admin_users_router)
 app.include_router(events_router)
 app.include_router(tickets_router)
 app.include_router(admin_tickets_router)
+app.include_router(orders_router)
+app.include_router(payments_router)
 
 
 @app.middleware("http")

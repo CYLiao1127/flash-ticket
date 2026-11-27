@@ -34,6 +34,7 @@ EXPECTED_PUBLIC_ROUTES: Set[Tuple[str, str]] = {
     ("GET", "/health"),
     ("POST", "/api/v1/auth/register"),
     ("POST", "/api/v1/auth/login"),
+    ("POST", "/api/v1/payments/webhook"),  # HMAC-SHA256 signed gateway callback
 }
 
 ALL_ROLES: Tuple[str, ...] = ("admin", "user", "viewer")

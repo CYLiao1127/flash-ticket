@@ -123,10 +123,10 @@ docker compose --profile testing run --rm test python scripts/benchmark_token_re
 - [x] 雙重防超賣保證（PostgreSQL 條件更新 + 部分唯一索引 `uq_active_seat_order`）
 - [x] 冪等性處理（Idempotency Key：成功 200、處理中 409、參數不符 422）與原子 Outbox 活動序號 (`events.last_seq`)
 - [x] 5% 服務費精確四捨五入（`Decimal` `ROUND_HALF_UP`）
-- [ ] 模擬金流服務與 HMAC Webhook 簽章回呼
-- [ ] 逾時未付款自動釋放（DB-Clock `NOW()` 冪等釋放）
+- [x] 模擬金流服務與 HMAC Webhook 簽章回呼（5 分鐘防重放 + 事件冪等）
+- [x] 逾時未付款自動釋放（DB-Clock `NOW()` 冪等釋放 Worker）
 - [ ] 逾時後 Webhook 到達的「復活 or 退款」事務處理
-- [ ] 訂單查詢與使用者自主取消訂單
+- [x] 訂單查詢與使用者自主取消訂單
 
 ### 4. 即時監控與維運
 

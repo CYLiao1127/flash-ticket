@@ -17,6 +17,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.logging import request_id_ctx, setup_logging
 from app.core.redis import close_redis, get_redis
 from app.events.import_service import recover_stale_import_jobs
+from app.payments.service import release_expired_orders
 from app.models import EventOutbox, OutboxStatus
 from app.db import AsyncSessionLocal
 
@@ -110,6 +111,9 @@ async def main():
                     recovered = await recover_stale_import_jobs(session)
                     if recovered > 0:
                         logger.warning(f"Recovered {recovered} stale import jobs as failed.")
+                    released = await release_expired_orders(session)
+                    if released > 0:
+                        logger.info(f"Released {released} expired unpaid orders via DB clock.")
             except Exception as e:
                 logger.error(f"Worker encountered error: {e}", exc_info=True)
 
