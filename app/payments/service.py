@@ -5,7 +5,7 @@ import logging
 import time
 import uuid
 from decimal import Decimal
-from typing import Dict, List, Optional, Tuple
+from typing import Awaitable, Callable, Dict, List, Optional, Tuple
 
 from fastapi import HTTPException, status
 from sqlalchemy import func, select, text
@@ -658,6 +658,8 @@ async def trigger_mock_payment(
 async def release_expired_orders(
     session: AsyncSession,
     limit: int = 50,
+    on_orders_locked: Optional[Callable[[List[int]], Awaitable[None]]] = None,
+    on_before_commit: Optional[Callable[[List[int]], Awaitable[None]]] = None,
 ) -> int:
     """
     DB-Clock 逾時訂單自動釋放 Worker (Q2.3, Q2.4)：
@@ -680,6 +682,9 @@ async def release_expired_orders(
     expired_orders = list((await session.execute(stmt)).scalars().all())
     if not expired_orders:
         return 0
+
+    if on_orders_locked is not None:
+        await on_orders_locked([o.id for o in expired_orders])
 
     grouped = await _load_order_items_with_seats(
         session, [o.id for o in expired_orders]
@@ -746,6 +751,10 @@ async def release_expired_orders(
                 },
             )
         )
+
+    if on_before_commit is not None:
+        await session.flush()
+        await on_before_commit([o.id for o in expired_orders])
 
     await session.commit()
     return len(expired_orders)
